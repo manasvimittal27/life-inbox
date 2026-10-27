@@ -67,6 +67,9 @@ class InboxItem(BaseModel):
 
 
 Priority = Literal["High", "Medium", "Low"]
+Bucket = Literal["P0", "P1", "P2"]
+TaskType = Literal["recurring", "one_off"]
+Importance = Literal["high", "normal"]
 AnalysisMode = Literal[
     "openai",
     "fallback_no_api_call",
@@ -95,6 +98,13 @@ class AnalysisTodo(StrictAnalysisModel):
     priority: Priority
     source_note_ids: List[int] = Field(min_length=1)
     when: Optional[str] = None
+    # Structured scheduling fields (optional so older payloads still validate).
+    bucket: Optional[Bucket] = None
+    due_date: Optional[str] = None
+    task_type: TaskType = "one_off"
+    recurrence: Optional[str] = None
+    importance: Importance = "normal"
+    effort_min: Optional[int] = Field(default=None, ge=0)
 
 
 class AnalysisPriorityItem(StrictAnalysisModel):
@@ -175,3 +185,9 @@ class Task(BaseModel):
     source_item_ids: List[int]
     created_at: str
     updated_at: str
+    bucket: Optional[Bucket] = None
+    due_date: Optional[str] = None
+    task_type: TaskType = "one_off"
+    recurrence: Optional[str] = None
+    importance: Importance = "normal"
+    effort_min: Optional[int] = None

@@ -340,6 +340,49 @@ async function deleteExistingNote(note, root, editButton, deleteButton) {
   }
 }
 
+function formatDueDate(iso) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  if (!match) return iso || '';
+  const d = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return d.toLocaleDateString(undefined, {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short'
+  });
+}
+
+function scheduleLabel(item) {
+  if (item.task_type === 'recurring' || item.recurrence) {
+    return `🔁 ${item.recurrence || 'recurring'}`;
+  }
+  if (item.due_date) return formatDueDate(item.due_date);
+  if (item.when) return item.when;
+  if (item.timing_text) return item.timing_text;
+  return '';
+}
+
+function bucketPillHtml(item) {
+  if (!item.bucket) {
+    return `<span class="pill">${esc(item.priority || '')}</span>`;
+  }
+  const star = item.importance === 'high' ? ' ★' : '';
+  return `<span class="pill bucket-${esc(item.bucket)}">${esc(item.bucket)}${star}</span>`;
+}
+
+function bucketPillNode(item) {
+  const span = document.createElement('span');
+  if (!item.bucket) {
+    span.className = 'pill';
+    span.textContent = item.priority || '';
+    return span;
+  }
+  span.className = `pill bucket-${item.bucket}`;
+  span.textContent = item.importance === 'high'
+    ? `${item.bucket} ★`
+    : item.bucket;
+  return span;
+}
+
 function renderTask(task) {
   const root = document.createElement('div');
   root.className = 'task';
@@ -348,20 +391,20 @@ function renderTask(task) {
   const text = document.createElement('strong');
   text.textContent = task.text;
 
-  const priority = document.createElement('span');
-  priority.className = 'pill';
-  priority.textContent = task.priority;
+  const priority = bucketPillNode(task);
 
   const content = document.createElement('div');
   content.append(text, priority);
 
   const meta = document.createElement('div');
   meta.className = 'task-meta';
-  const timing = task.timing_text ? ` · ${task.timing_text}` : '';
+  const sched = scheduleLabel(task);
+  const schedText = sched ? ` · ${sched}` : '';
+  const effort = task.effort_min ? ` · ${task.effort_min}m` : '';
   const sources = task.source_item_ids
     .map(itemId => `#${itemId}`)
     .join(', ');
-  meta.textContent = `${task.status}${timing} · Sources: ${sources}`;
+  meta.textContent = `${task.status}${schedText}${effort} · Sources: ${sources}`;
 
   const actions = document.createElement('div');
   actions.className = 'task-actions';
@@ -471,9 +514,12 @@ function renderAnalysis(data) {
     </div>
   `).join('');
 
-  const todoHtml = (data.todos || []).map(t =>
-    `<li><strong>${esc(t.task)}</strong> <span class="pill">${esc(t.priority)}</span>${t.when ? ` · ${esc(t.when)}` : ''}</li>`
-  ).join('');
+  const todoHtml = (data.todos || []).map(t => {
+    const sched = scheduleLabel(t);
+    const schedText = sched ? ` · ${esc(sched)}` : '';
+    const effort = t.effort_min ? ` · ${t.effort_min}m` : '';
+    return `<li><strong>${esc(t.task)}</strong> ${bucketPillHtml(t)}${schedText}${effort}</li>`;
+  }).join('');
 
   const pv = data.priority_view || {High: [], Medium: [], Low: []};
   const priorityHtml = ['High', 'Medium', 'Low'].map(level => `

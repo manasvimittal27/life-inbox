@@ -116,6 +116,13 @@ class TaskRecord(Base):
     dedup_key = Column(Text, nullable=False)
     created_at = Column(Text, nullable=False)
     updated_at = Column(Text, nullable=False)
+    # Structured scheduling fields (migration 0007).
+    bucket = Column(Text, nullable=True)
+    due_date = Column(Text, nullable=True)
+    task_type = Column(Text, nullable=False, server_default="one_off")
+    recurrence = Column(Text, nullable=True)
+    importance = Column(Text, nullable=False, server_default="normal")
+    effort_min = Column(Integer, nullable=False, server_default="60")
 
 
 class TaskSourceItemRecord(Base):
@@ -341,6 +348,8 @@ def complete_analysis_run(run_id: int, result: dict) -> dict:
                 .order_by(TaskRecord.id.asc())
             ).all()
 
+            structured = _structured_task_fields(todo)
+
             if not existing_tasks:
                 task = TaskRecord(
                     text=todo["task"],
@@ -350,6 +359,7 @@ def complete_analysis_run(run_id: int, result: dict) -> dict:
                     dedup_key=_task_dedup_key(source_item_ids),
                     created_at=completed_at,
                     updated_at=completed_at,
+                    **structured,
                 )
                 session.add(task)
                 session.flush()
@@ -372,10 +382,22 @@ def complete_analysis_run(run_id: int, result: dict) -> dict:
                     task.text != todo["task"]
                     or task.priority != todo["priority"]
                     or task.timing_text != todo["when"]
+                    or task.bucket != structured["bucket"]
+                    or task.due_date != structured["due_date"]
+                    or task.task_type != structured["task_type"]
+                    or task.recurrence != structured["recurrence"]
+                    or task.importance != structured["importance"]
+                    or task.effort_min != structured["effort_min"]
                 )
                 task.text = todo["task"]
                 task.priority = todo["priority"]
                 task.timing_text = todo["when"]
+                task.bucket = structured["bucket"]
+                task.due_date = structured["due_date"]
+                task.task_type = structured["task_type"]
+                task.recurrence = structured["recurrence"]
+                task.importance = structured["importance"]
+                task.effort_min = structured["effort_min"]
                 task.dedup_key = _task_dedup_key(list(task_source_ids))
                 if changed:
                     task.updated_at = completed_at
@@ -448,6 +470,29 @@ def get_latest_successful_analysis() -> Optional[dict]:
         }
 
 
+_PRIORITY_TO_BUCKET = {"High": "P0", "Medium": "P1", "Low": "P2"}
+
+
+def _structured_task_fields(todo: dict) -> dict:
+    """Pull the structured scheduling fields off a todo, filling sane defaults.
+
+    Older/simpler todos (and the historical test payloads) only carry
+    ``priority``/``when``; for those we derive a bucket from the priority so a
+    task always lands in P0/P1/P2.
+    """
+    bucket = todo.get("bucket") or _PRIORITY_TO_BUCKET.get(
+        todo.get("priority"), "P1"
+    )
+    return {
+        "bucket": bucket,
+        "due_date": todo.get("due_date"),
+        "task_type": todo.get("task_type") or "one_off",
+        "recurrence": todo.get("recurrence"),
+        "importance": todo.get("importance") or "normal",
+        "effort_min": todo.get("effort_min") or 60,
+    }
+
+
 def _task_dedup_key(source_item_ids: list[int]) -> str:
     fingerprint = json.dumps(
         sorted(set(source_item_ids)),
@@ -472,6 +517,12 @@ def _task_to_dict(session, task: TaskRecord) -> dict:
         "source_item_ids": list(source_item_ids),
         "created_at": task.created_at,
         "updated_at": task.updated_at,
+        "bucket": task.bucket,
+        "due_date": task.due_date,
+        "task_type": task.task_type,
+        "recurrence": task.recurrence,
+        "importance": task.importance,
+        "effort_min": task.effort_min,
     }
 
 

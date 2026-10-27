@@ -26,7 +26,10 @@ button:disabled { cursor: not-allowed; opacity: 0.65; }
 .task-actions button { margin: 0; padding: 7px 11px; }
 .note-edit-input { min-height: 72px; }
 .time { color: #777; font-size: 12px; margin-top: 6px; }
-.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eef2f7; margin-left: 6px; font-size: 12px; }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eef2f7; margin-left: 6px; font-size: 12px; font-weight: 600; }
+.pill.bucket-P0 { background: #fde0e0; color: #b42318; }
+.pill.bucket-P1 { background: #fdf0d5; color: #9a6700; }
+.pill.bucket-P2 { background: #e6f0f5; color: #0b5566; }
 ul { padding-left: 22px; }
 .muted { color: #666; }
 .status { min-height: 20px; margin: 8px 0 0; }

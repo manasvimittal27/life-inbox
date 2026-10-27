@@ -458,7 +458,10 @@ def test_analyze_empty_inbox(client):
 
 
 def test_analyze_uses_deterministic_fallback_without_openai_key(client):
+    from datetime import date, timedelta
+
     note_text = "Call the team tomorrow"
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
     create_response = client.post("/api/notes", json={"text": note_text})
 
     response = client.post("/api/analyze")
@@ -487,6 +490,12 @@ def test_analyze_uses_deterministic_fallback_without_openai_key(client):
                 "priority": "High",
                 "source_note_ids": [1],
                 "when": None,
+                "bucket": "P0",
+                "due_date": tomorrow,
+                "task_type": "one_off",
+                "recurrence": None,
+                "importance": "normal",
+                "effort_min": 30,
             }
         ],
         "priority_view": {
