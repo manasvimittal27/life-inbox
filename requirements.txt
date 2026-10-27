@@ -4,6 +4,7 @@ pydantic
 sqlalchemy
 alembic
 openai
+python-dotenv
 requests
 pytest
 httpx
