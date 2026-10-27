@@ -25,6 +25,11 @@
 
     <h2>Tasks</h2>
     <div class="task-toolbar">
+      <label for="taskViewMode">View</label>
+      <select id="taskViewMode" onchange="changeTaskView()">
+        <option value="week">Week</option>
+        <option value="list">List</option>
+      </select>
       <label for="taskStatusFilter">Show</label>
       <select id="taskStatusFilter" onchange="changeTaskStatusFilter()">
         <option value="open">Open</option>
@@ -33,6 +38,7 @@
       </select>
     </div>
     <p id="taskStatus" class="status muted" role="status" aria-live="polite"></p>
+    <div id="weekView"></div>
     <div id="tasks"></div>
 
     <h2>Raw saved notes</h2>

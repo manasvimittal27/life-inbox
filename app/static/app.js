@@ -1,5 +1,6 @@
 let isSavingNote = false;
 let isAnalyzingInbox = false;
+let lastTasks = [];
 const pendingNoteActions = new Set();
 const pendingTaskActions = new Set();
 const itemFilterFields = {
@@ -128,6 +129,10 @@ function changeTaskStatusFilter() {
   const status = document.getElementById('taskStatusFilter').value;
   updateUrl({task_status: status});
   loadTasks();
+}
+
+function changeTaskView() {
+  renderTaskView();
 }
 
 async function fetchJson(url, options, friendlyError) {
@@ -475,17 +480,8 @@ async function loadTasks() {
       undefined,
       'Unable to load tasks.'
     );
-    const root = document.getElementById('tasks');
-    root.innerHTML = '';
-
-    if (!tasks.length) {
-      root.innerHTML = '<div class="panel muted">No tasks in this view.</div>';
-      return true;
-    }
-
-    for (const task of tasks) {
-      root.appendChild(renderTask(task));
-    }
+    lastTasks = tasks;
+    renderTaskView();
     return true;
   } catch {
     setStatus(
@@ -495,6 +491,160 @@ async function loadTasks() {
     );
     return false;
   }
+}
+
+function renderTaskView() {
+  const mode = document.getElementById('taskViewMode').value;
+  const weekRoot = document.getElementById('weekView');
+  const listRoot = document.getElementById('tasks');
+  if (mode === 'week') {
+    listRoot.style.display = 'none';
+    weekRoot.style.display = '';
+    renderWeek(lastTasks);
+  } else {
+    weekRoot.style.display = 'none';
+    weekRoot.innerHTML = '';
+    listRoot.style.display = '';
+    renderList(lastTasks);
+  }
+}
+
+function renderList(tasks) {
+  const root = document.getElementById('tasks');
+  root.innerHTML = '';
+  if (!tasks.length) {
+    root.innerHTML = '<div class="panel muted">No tasks in this view.</div>';
+    return;
+  }
+  for (const task of tasks) {
+    root.appendChild(renderTask(task));
+  }
+}
+
+// --- Week view ---------------------------------------------------------------
+
+const BUCKET_ORDER = {P0: 0, P1: 1, P2: 2};
+
+function startOfWeek(d) {
+  const day = d.getDay();            // 0 Sun .. 6 Sat
+  const diff = day === 0 ? -6 : 1 - day;  // back to Monday
+  const monday = new Date(d);
+  monday.setDate(d.getDate() + diff);
+  monday.setHours(0, 0, 0, 0);
+  return monday;
+}
+
+function localIso(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function compareTasks(a, b) {
+  const ba = BUCKET_ORDER[a.bucket] ?? 3;
+  const bb = BUCKET_ORDER[b.bucket] ?? 3;
+  if (ba !== bb) return ba - bb;
+  const ia = a.importance === 'high' ? 0 : 1;
+  const ib = b.importance === 'high' ? 0 : 1;
+  if (ia !== ib) return ia - ib;
+  return a.id - b.id;
+}
+
+function weekTaskHtml(task, showDate) {
+  let sched = '';
+  if (showDate) {
+    sched = scheduleLabel(task);
+  } else if (task.task_type === 'recurring') {
+    sched = `🔁 ${task.recurrence || 'recurring'}`;
+  }
+  const schedText = sched ? ` · ${esc(sched)}` : '';
+  const effort = task.effort_min ? ` · ${task.effort_min}m` : '';
+  const doneClass = task.status === 'completed' ? ' week-task-done' : '';
+  return `<div class="week-task${doneClass}">${bucketPillHtml(task)}` +
+    `<span class="week-task-text">${esc(task.text)}</span>` +
+    `<span class="week-task-meta">${schedText}${effort}</span></div>`;
+}
+
+function renderWeek(tasks) {
+  const root = document.getElementById('weekView');
+
+  if (!tasks.length) {
+    root.innerHTML = '<div class="panel muted">No tasks in this view.</div>';
+    return;
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayIso = localIso(today);
+  const monday = startOfWeek(today);
+  const days = [];
+  for (let i = 0; i < 7; i += 1) {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    days.push(d);
+  }
+  const weekIsos = days.map(localIso);
+
+  const recurring = tasks.filter(t => t.task_type === 'recurring');
+  const dated = tasks.filter(
+    t => t.task_type !== 'recurring'
+      && t.due_date
+      && weekIsos.includes(t.due_date)
+  );
+  const backlog = tasks.filter(
+    t => t.task_type !== 'recurring'
+      && (!t.due_date || !weekIsos.includes(t.due_date))
+  );
+
+  const dayCards = days.map((d, idx) => {
+    const iso = weekIsos[idx];
+    const dayTasks = [
+      ...recurring,
+      ...dated.filter(t => t.due_date === iso)
+    ].sort(compareTasks);
+
+    const label = d.toLocaleDateString(undefined, {weekday: 'short'});
+    const dateLabel = d.toLocaleDateString(undefined, {
+      day: 'numeric',
+      month: 'short'
+    });
+    const isToday = iso === todayIso;
+    const body = dayTasks.length
+      ? dayTasks.map(t => weekTaskHtml(t, false)).join('')
+      : '<div class="muted week-empty">—</div>';
+
+    return `
+      <div class="day-card${isToday ? ' day-today' : ''}">
+        <div class="day-head">
+          <span class="day-name">${esc(label)}</span>
+          <span class="day-date">${esc(dateLabel)}</span>
+        </div>
+        ${body}
+      </div>
+    `;
+  }).join('');
+
+  let backlogHtml = '';
+  if (backlog.length) {
+    const sorted = [...backlog].sort(compareTasks);
+    backlogHtml = `
+      <div class="panel backlog">
+        <h3>Backlog &amp; undated (${backlog.length})</h3>
+        ${sorted.map(t => {
+          const overdue = t.due_date && t.due_date < todayIso
+            ? ' <span class="overdue">overdue</span>'
+            : '';
+          return weekTaskHtml(t, true).replace(
+            '</div>',
+            `${overdue}</div>`
+          );
+        }).join('')}
+      </div>
+    `;
+  }
+
+  root.innerHTML = `<div class="week-grid">${dayCards}</div>${backlogHtml}`;
 }
 
 function renderAnalysis(data) {

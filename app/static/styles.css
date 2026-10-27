@@ -31,6 +31,24 @@ button:disabled { cursor: not-allowed; opacity: 0.65; }
 .pill.bucket-P1 { background: #fdf0d5; color: #9a6700; }
 .pill.bucket-P2 { background: #e6f0f5; color: #0b5566; }
 ul { padding-left: 22px; }
+.week-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
+.day-card { background: white; border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px; min-height: 90px; }
+.day-today { border-color: #0b7285; box-shadow: 0 0 0 1px #0b7285; }
+.day-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.day-name { font-weight: 700; }
+.day-date { color: #777; font-size: 12px; }
+.week-task { font-size: 13px; padding: 5px 0; border-top: 1px solid #f0f2f4; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px; }
+.week-task:first-of-type { border-top: 0; }
+.week-task .pill { margin-left: 0; }
+.week-task-text { margin-left: 4px; }
+.week-task-meta { color: #777; font-size: 12px; }
+.week-task-done .week-task-text { text-decoration: line-through; color: #999; }
+.week-empty { font-size: 13px; }
+.backlog h3 { margin-top: 0; }
+.overdue { color: #b42318; font-size: 11px; font-weight: 600; margin-left: 4px; }
+@media (max-width: 760px) {
+  .week-grid { grid-template-columns: 1fr; }
+}
 .muted { color: #666; }
 .status { min-height: 20px; margin: 8px 0 0; }
 .status.error { color: #b42318; }
