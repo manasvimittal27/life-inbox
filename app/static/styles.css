@@ -93,6 +93,17 @@ ul { padding-left: 22px; }
 .progress-fill { display: block; height: 100%; background: var(--primary); }
 .progress-pct { font-size: 12px; color: #555; }
 
+/* Today's time pie */
+.time-panel .time-budget { display: inline-grid; gap: 5px; color: #555; font-size: 13px; margin-bottom: 12px; }
+.time-panel .time-budget input { width: 90px; padding: 7px 10px; border: 1px solid #ccc; border-radius: 8px; }
+.time-layout { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+.donut { flex: none; }
+.time-info { font-size: 14px; }
+.time-legend { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 4px; }
+.time-legend li { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; }
+.over { color: var(--danger); font-weight: 600; margin: 8px 0 0; }
+
 /* Mobile */
 @media (max-width: 600px) {
   body { margin: 16px; }
