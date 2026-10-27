@@ -507,6 +507,7 @@ async function loadTasks() {
     );
     lastTasks = tasks;
     renderTaskView();
+    renderTimePie();
     return true;
   } catch {
     setStatus(
@@ -689,6 +690,114 @@ function renderWeek(tasks) {
   }
 
   root.innerHTML = `<div class="week-grid">${dayCards}</div>${backlogHtml}`;
+}
+
+// --- Today's time pie --------------------------------------------------------
+
+function fmtMins(mins) {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
+
+function todayOccupancy(tasks) {
+  const todayIso = localIso(new Date());
+  const totals = {P0: 0, P1: 0, P2: 0};
+  for (const t of tasks) {
+    if (t.status !== 'open') continue;  // only open tasks occupy the day
+    let countsToday = false;
+    if (t.task_type === 'recurring') {
+      countsToday = true;
+    } else if (t.due_date === todayIso) {
+      countsToday = true;
+    } else if (t.due_date && t.due_date < todayIso) {
+      countsToday = true;  // overdue, carried onto today
+    }
+    if (!countsToday) continue;
+    const bucket = t.bucket || 'P2';
+    totals[bucket] = (totals[bucket] || 0) + (t.effort_min || 0);
+  }
+  return totals;
+}
+
+function buildDonut(slices, ringTotal) {
+  const size = 150;
+  const stroke = 26;
+  const r = (size - stroke) / 2;
+  const cx = size / 2;
+  const cy = size / 2;
+  const circ = 2 * Math.PI * r;
+  let acc = 0;
+  const segs = [];
+  for (const s of slices) {
+    if (s.value <= 0) continue;
+    const len = (s.value / ringTotal) * circ;
+    segs.push(
+      `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" ` +
+      `stroke="${s.color}" stroke-width="${stroke}" ` +
+      `stroke-dasharray="${len.toFixed(2)} ${(circ - len).toFixed(2)}" ` +
+      `stroke-dashoffset="${(-acc).toFixed(2)}"></circle>`
+    );
+    acc += len;
+  }
+  return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" class="donut" aria-hidden="true">` +
+    `<g transform="rotate(-90 ${cx} ${cy})">` +
+    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#eef2f7" stroke-width="${stroke}"></circle>` +
+    segs.join('') +
+    `</g></svg>`;
+}
+
+function renderTimePie() {
+  const el = document.getElementById('timePie');
+  if (!el) return;
+  const budgetH = parseFloat(document.getElementById('dayBudget').value) || 16;
+  try {
+    localStorage.setItem('dayBudgetH', String(budgetH));
+  } catch (e) { /* ignore */ }
+
+  const budget = Math.round(budgetH * 60);
+  const totals = todayOccupancy(lastTasks);
+  const occupied = totals.P0 + totals.P1 + totals.P2;
+
+  if (occupied === 0) {
+    el.innerHTML = '<p class="muted">No time committed today. Add effort ' +
+      'estimates to today’s tasks to see your day fill up.</p>';
+    return;
+  }
+
+  const free = Math.max(0, budget - occupied);
+  const over = Math.max(0, occupied - budget);
+  const ring = Math.max(budget, occupied) || 1;
+  const slices = [
+    {label: 'P0 urgent', value: totals.P0, color: '#b42318'},
+    {label: 'P1 deep work', value: totals.P1, color: '#9a6700'},
+    {label: 'P2 operational', value: totals.P2, color: '#0b5566'},
+    {label: 'Free', value: free, color: '#86c08f'}
+  ];
+  const legend = slices
+    .filter(s => s.value > 0)
+    .map(s =>
+      `<li><span class="swatch" style="background:${s.color}"></span>` +
+      `${s.label} — ${fmtMins(s.value)}</li>`
+    )
+    .join('');
+  const pct = budget ? Math.round((occupied / budget) * 100) : 0;
+  const overMsg = over > 0
+    ? `<p class="over">Overbooked by ${fmtMins(over)}</p>`
+    : '';
+
+  el.innerHTML = `
+    <div class="time-layout">
+      ${buildDonut(slices, ring)}
+      <div class="time-info">
+        <p><strong>${fmtMins(occupied)}</strong> committed of ${fmtMins(budget)} (${pct}%)</p>
+        <ul class="time-legend">${legend}</ul>
+        ${overMsg}
+      </div>
+    </div>
+  `;
 }
 
 // --- Task actions & edit modal ----------------------------------------------
@@ -1013,7 +1122,15 @@ async function loadNotes(
   }
 }
 
+function restoreDayBudget() {
+  try {
+    const saved = localStorage.getItem('dayBudgetH');
+    if (saved) document.getElementById('dayBudget').value = saved;
+  } catch (e) { /* ignore */ }
+}
+
 syncControlsFromUrl();
+restoreDayBudget();
 loadNotes();
 loadLatestAnalysis();
 loadTasks();
