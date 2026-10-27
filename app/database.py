@@ -394,26 +394,17 @@ def complete_analysis_run(run_id: int, result: dict) -> dict:
                         TaskSourceItemRecord.task_id == task.id
                     )
                 ).all()
+                # Refresh the wording/priority from the (possibly edited) note,
+                # but PRESERVE the structured scheduling fields, status, and
+                # progress so re-analysis never clobbers the user's own edits.
                 changed = (
                     task.text != todo["task"]
                     or task.priority != todo["priority"]
                     or task.timing_text != todo["when"]
-                    or task.bucket != structured["bucket"]
-                    or task.due_date != structured["due_date"]
-                    or task.task_type != structured["task_type"]
-                    or task.recurrence != structured["recurrence"]
-                    or task.importance != structured["importance"]
-                    or task.effort_min != structured["effort_min"]
                 )
                 task.text = todo["task"]
                 task.priority = todo["priority"]
                 task.timing_text = todo["when"]
-                task.bucket = structured["bucket"]
-                task.due_date = structured["due_date"]
-                task.task_type = structured["task_type"]
-                task.recurrence = structured["recurrence"]
-                task.importance = structured["importance"]
-                task.effort_min = structured["effort_min"]
                 task.dedup_key = _task_dedup_key(list(task_source_ids))
                 if changed:
                     task.updated_at = completed_at

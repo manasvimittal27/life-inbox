@@ -739,6 +739,31 @@ def test_recurring_progress_resets_each_day(client):
     assert database.get_task_from_db(task["id"], tomorrow)["progress_pct"] == 0
 
 
+def test_reanalysis_preserves_user_edits_and_progress(client):
+    client.post("/api/items", json={"raw_text": "Call the team tomorrow"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+    task_id = task["id"]
+
+    # The user re-buckets the task, shortens the effort, and logs progress.
+    client.put(
+        f"/api/tasks/{task_id}",
+        json={"bucket": "P2", "effort_min": 5, "importance": "high"},
+    )
+    client.post(f"/api/tasks/{task_id}/progress", json={"pct": 40})
+
+    # Re-running analysis must not clobber those edits or the progress.
+    client.post("/api/analyze")
+
+    after = client.get("/api/tasks").json()
+    assert len(after) == 1
+    assert after[0]["id"] == task_id
+    assert after[0]["bucket"] == "P2"
+    assert after[0]["effort_min"] == 5
+    assert after[0]["importance"] == "high"
+    assert after[0]["progress_pct"] == 40
+
+
 def test_reanalysis_updates_task_by_source_without_changing_status(
     client, monkeypatch
 ):

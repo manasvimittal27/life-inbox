@@ -587,8 +587,11 @@ function weekTaskHtml(task, showDate) {
   const effort = task.effort_min ? ` · ${task.effort_min}m` : '';
   const doneClass = task.status === 'completed' ? ' week-task-done' : '';
   const progress = task.progress_pct ? progressBarHtml(task.progress_pct) : '';
+  const overdue = task._overdue
+    ? ` <span class="overdue">overdue</span>`
+    : '';
   return `<div class="week-task${doneClass}">${bucketPillHtml(task)}` +
-    `<span class="week-task-text">${esc(task.text)}</span>` +
+    `<span class="week-task-text">${esc(task.text)}</span>${overdue}` +
     `<span class="week-task-meta">${schedText}${effort}</span>` +
     taskHoverActionsHtml(task.id) +
     progress +
@@ -624,21 +627,28 @@ function renderWeek(tasks) {
   const weekIsos = days.map(localIso);
 
   const recurring = tasks.filter(t => t.task_type === 'recurring');
-  const dated = tasks.filter(
-    t => t.task_type !== 'recurring'
-      && t.due_date
-      && weekIsos.includes(t.due_date)
-  );
-  const backlog = tasks.filter(
-    t => t.task_type !== 'recurring'
-      && (!t.due_date || !weekIsos.includes(t.due_date))
-  );
+
+  // Assign each one-off task to a day column, carry open past-due ones onto
+  // today, and send the rest (undated / out-of-week) to the backlog.
+  const byDay = {};
+  weekIsos.forEach(iso => { byDay[iso] = []; });
+  const backlog = [];
+  for (const t of tasks) {
+    if (t.task_type === 'recurring') continue;
+    if (!t.due_date) { backlog.push(t); continue; }
+    if (t.status === 'open' && t.due_date < todayIso) {
+      byDay[todayIso].push({...t, _overdue: true});  // carry forward
+      continue;
+    }
+    if (weekIsos.includes(t.due_date)) { byDay[t.due_date].push(t); continue; }
+    backlog.push(t);
+  }
 
   const dayCards = days.map((d, idx) => {
     const iso = weekIsos[idx];
     const dayTasks = [
       ...recurring,
-      ...dated.filter(t => t.due_date === iso)
+      ...byDay[iso]
     ].sort(compareTasks);
 
     const label = d.toLocaleDateString(undefined, {weekday: 'short'});
@@ -669,13 +679,10 @@ function renderWeek(tasks) {
       <div class="panel backlog">
         <h3>Backlog &amp; undated (${backlog.length})</h3>
         ${sorted.map(t => {
-          const overdue = t.due_date && t.due_date < todayIso
-            ? ' <span class="overdue">overdue</span>'
-            : '';
-          return weekTaskHtml(t, true).replace(
-            '</div>',
-            `${overdue}</div>`
-          );
+          const flagged = t.status === 'open'
+            && t.due_date
+            && t.due_date < todayIso;
+          return weekTaskHtml({...t, _overdue: flagged}, true);
         }).join('')}
       </div>
     `;
