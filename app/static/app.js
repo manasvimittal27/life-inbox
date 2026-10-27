@@ -412,6 +412,16 @@ function renderTask(task) {
     .join(', ');
   meta.textContent = `${task.status}${schedText}${effort} · Sources: ${sources}`;
 
+  let progress = null;
+  if (task.progress_pct) {
+    progress = document.createElement('div');
+    progress.className = 'progress';
+    progress.innerHTML =
+      `<span class="progress-bar"><span class="progress-fill" ` +
+      `style="width:${task.progress_pct}%"></span></span>` +
+      `<span class="progress-pct">${task.progress_pct}%</span>`;
+  }
+
   const actions = document.createElement('div');
   actions.className = 'task-actions';
 
@@ -442,7 +452,11 @@ function renderTask(task) {
     })
   );
 
-  root.append(content, meta, actions);
+  if (progress) {
+    root.append(content, meta, progress, actions);
+  } else {
+    root.append(content, meta, actions);
+  }
   return root;
 }
 
@@ -572,10 +586,12 @@ function weekTaskHtml(task, showDate) {
   const schedText = sched ? ` · ${esc(sched)}` : '';
   const effort = task.effort_min ? ` · ${task.effort_min}m` : '';
   const doneClass = task.status === 'completed' ? ' week-task-done' : '';
+  const progress = task.progress_pct ? progressBarHtml(task.progress_pct) : '';
   return `<div class="week-task${doneClass}">${bucketPillHtml(task)}` +
     `<span class="week-task-text">${esc(task.text)}</span>` +
     `<span class="week-task-meta">${schedText}${effort}</span>` +
     taskHoverActionsHtml(task.id) +
+    progress +
     `</div>`;
 }
 
@@ -729,9 +745,48 @@ function openTaskModal(taskId) {
   document.getElementById('editImportance').checked = task.importance === 'high';
   document.getElementById('editEffort').value =
     task.effort_min != null ? task.effort_min : '';
+  document.getElementById('editProgressNote').value = task.progress_note || '';
+  document.getElementById('editProgressPct').value =
+    task.progress_pct != null ? task.progress_pct : '';
   onEditTypeChange();
   setStatus('editStatus', '');
   document.getElementById('taskModalBackdrop').hidden = false;
+}
+
+async function logProgress() {
+  if (editingTaskId == null) return;
+  const note = document.getElementById('editProgressNote').value.trim();
+  const pctRaw = document.getElementById('editProgressPct').value;
+  const payload = {};
+  if (note) payload.note = note;
+  if (pctRaw !== '') payload.pct = Number(pctRaw);
+  if (payload.pct == null && !payload.note) {
+    setStatus('editStatus', 'Add a progress note or a %.', true);
+    return;
+  }
+  setStatus('editStatus', 'Logging progress…');
+  try {
+    const updated = await fetchJson(
+      `/api/tasks/${editingTaskId}/progress`,
+      {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      },
+      'Unable to log progress.'
+    );
+    document.getElementById('editProgressPct').value = updated.progress_pct;
+    setStatus('editStatus', `Logged: ${updated.progress_pct}% complete today.`);
+    await loadTasks();
+  } catch {
+    setStatus('editStatus', 'Could not log progress. Please try again.', true);
+  }
+}
+
+function progressBarHtml(pct) {
+  return `<span class="progress">` +
+    `<span class="progress-bar"><span class="progress-fill" style="width:${pct}%"></span></span>` +
+    `<span class="progress-pct">${pct}%</span></span>`;
 }
 
 function closeTaskModal() {

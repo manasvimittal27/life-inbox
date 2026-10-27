@@ -130,6 +130,22 @@
         <button type="button" onclick="saveTaskEdit()">Save</button>
         <button type="button" class="secondary" onclick="closeTaskModal()">Cancel</button>
       </div>
+
+      <div class="modal-progress">
+        <h4>Progress (today)</h4>
+        <label class="modal-field">
+          Progress note
+          <textarea id="editProgressNote" maxlength="1000" placeholder="e.g. Watched 3 DSA lectures"></textarea>
+        </label>
+        <label class="modal-field">
+          % complete
+          <input type="number" id="editProgressPct" min="0" max="100" step="5" />
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="secondary" onclick="logProgress()">Log progress</button>
+        </div>
+        <p class="muted small">Leave % blank to let AI estimate it from your note.</p>
+      </div>
       <p id="editStatus" class="status muted" role="status" aria-live="polite"></p>
     </div>
   </div>

@@ -671,6 +671,74 @@ def test_delete_missing_task_returns_404(client):
     assert response.status_code == 404
 
 
+def test_log_progress_manual_pct(client):
+    client.post("/api/items", json={"raw_text": "Call the team tomorrow"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+
+    response = client.post(
+        f"/api/tasks/{task['id']}/progress",
+        json={"pct": 60, "note": "Did half"},
+    )
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["progress_pct"] == 60
+    assert updated["progress_note"] == "Did half"
+    assert updated["progress_date"] == "once"  # one-off keeps a single row
+    assert client.get("/api/tasks").json()[0]["progress_pct"] == 60
+
+
+def test_log_progress_estimates_from_note_without_key(client):
+    # No OPENAI_API_KEY in tests, so the keyword fallback is used.
+    client.post("/api/items", json={"raw_text": "Call the team tomorrow"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+
+    response = client.post(
+        f"/api/tasks/{task['id']}/progress",
+        json={"note": "I finished it completely"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["progress_pct"] == 100
+
+
+def test_log_progress_requires_note_or_pct(client):
+    client.post("/api/items", json={"raw_text": "Call the team tomorrow"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+
+    response = client.post(f"/api/tasks/{task['id']}/progress", json={})
+    assert response.status_code == 422
+
+
+def test_log_progress_missing_task_returns_404(client):
+    response = client.post("/api/tasks/999/progress", json={"pct": 50})
+    assert response.status_code == 404
+
+
+def test_recurring_progress_resets_each_day(client):
+    from datetime import date, timedelta
+
+    client.post("/api/items", json={"raw_text": "Study Python daily"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+    assert task["task_type"] == "recurring"
+
+    client.post(
+        f"/api/tasks/{task['id']}/progress",
+        json={"pct": 70},
+    )
+
+    database = sys.modules["app.database"]
+    today = date.today().isoformat()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    # Today reflects the logged progress; a new day starts fresh at 0.
+    assert database.get_task_from_db(task["id"], today)["progress_pct"] == 70
+    assert database.get_task_from_db(task["id"], tomorrow)["progress_pct"] == 0
+
+
 def test_reanalysis_updates_task_by_source_without_changing_status(
     client, monkeypatch
 ):

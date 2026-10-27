@@ -191,6 +191,35 @@ class Task(BaseModel):
     recurrence: Optional[str] = None
     importance: Importance = "normal"
     effort_min: Optional[int] = None
+    progress_pct: int = 0
+    progress_note: Optional[str] = None
+    progress_date: Optional[str] = None
+
+
+class TaskProgressUpdate(BaseModel):
+    """Log progress on a task: a note (AI-estimated %) and/or a manual %."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note: Optional[str] = Field(default=None, max_length=1000)
+    pct: Optional[int] = Field(default=None, ge=0, le=100)
+    date: Optional[str] = None
+
+    @field_validator("date")
+    @classmethod
+    def validate_date(cls, value: Optional[str]) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        import re
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError("date must be an ISO date (YYYY-MM-DD)")
+        return value
+
+    @model_validator(mode="after")
+    def require_note_or_pct(self):
+        if self.pct is None and (self.note is None or not self.note.strip()):
+            raise ValueError("Provide a progress note or a percentage")
+        return self
 
 
 class TaskUpdate(BaseModel):

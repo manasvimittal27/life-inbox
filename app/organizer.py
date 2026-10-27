@@ -207,6 +207,49 @@ def fallback_analyze(notes: list[dict], today: Optional[date] = None) -> dict:
     }
 
 
+def _fallback_progress(note: str) -> int:
+    """Rough keyword estimate used when no OpenAI key is available."""
+    lowered = note.lower()
+    if any(w in lowered for w in ["done", "complete", "finished", "fully", "all of"]):
+        return 100
+    if any(w in lowered for w in ["almost", "nearly", "most of"]):
+        return 80
+    if any(w in lowered for w in ["half", "halfway"]):
+        return 50
+    if any(w in lowered for w in ["start", "began", "begun", "a bit", "barely", "little"]):
+        return 25
+    return 50
+
+
+def estimate_progress(task_text: str, note: str) -> int:
+    """Estimate today's completion % (0-100) from a free-text progress note."""
+    if not note or not note.strip():
+        return 0
+    if not os.getenv("OPENAI_API_KEY"):
+        return _fallback_progress(note)
+
+    try:
+        import re
+        from openai import OpenAI
+
+        client = OpenAI()
+        prompt = (
+            "Estimate how complete a person's work on a task is, based on their "
+            "short progress note, as a single integer from 0 to 100.\n"
+            f"Task: {task_text}\n"
+            f"Progress note: {note}\n"
+            "Reply with ONLY the number."
+        )
+        response = client.responses.create(model=MODEL, input=prompt)
+        match = re.search(r"\d{1,3}", response.output_text or "")
+        if match:
+            return max(0, min(100, int(match.group())))
+        return _fallback_progress(note)
+    except Exception:
+        logger.exception("Progress estimation failed; using keyword fallback")
+        return _fallback_progress(note)
+
+
 def validate_analysis_result(result: dict, notes: list[dict]) -> dict:
     validated = AnalysisResult.model_validate(result)
     validated.validate_for_item_ids({note["id"] for note in notes})

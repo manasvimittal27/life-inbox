@@ -1,7 +1,7 @@
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -142,6 +142,21 @@ class TaskSourceItemRecord(Base):
         ForeignKey("inbox_items.id", ondelete="CASCADE"),
         primary_key=True,
     )
+
+
+class TaskProgressRecord(Base):
+    __tablename__ = "task_progress"
+
+    task_id = Column(
+        Integer,
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # ISO date for recurring tasks; the sentinel "once" for one-off tasks.
+    progress_date = Column(Text, primary_key=True)
+    pct = Column(Integer, nullable=False)
+    note = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False)
 
 
 def init_db():
@@ -503,12 +518,23 @@ def _task_dedup_key(source_item_ids: list[int]) -> str:
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
 
-def _task_to_dict(session, task: TaskRecord) -> dict:
+PROGRESS_ONCE_KEY = "once"
+
+
+def _progress_key_for(task: TaskRecord, today_iso: str) -> str:
+    """Recurring tasks track progress per day; one-off tasks keep one rolling row."""
+    return today_iso if task.task_type == "recurring" else PROGRESS_ONCE_KEY
+
+
+def _task_to_dict(session, task: TaskRecord, today_iso: Optional[str] = None) -> dict:
+    today_iso = today_iso or date.today().isoformat()
     source_item_ids = session.scalars(
         select(TaskSourceItemRecord.item_id)
         .where(TaskSourceItemRecord.task_id == task.id)
         .order_by(TaskSourceItemRecord.item_id.asc())
     ).all()
+    key = _progress_key_for(task, today_iso)
+    progress = session.get(TaskProgressRecord, (task.id, key))
     return {
         "id": task.id,
         "text": task.text,
@@ -524,7 +550,49 @@ def _task_to_dict(session, task: TaskRecord) -> dict:
         "recurrence": task.recurrence,
         "importance": task.importance,
         "effort_min": task.effort_min,
+        "progress_pct": progress.pct if progress else 0,
+        "progress_note": progress.note if progress else None,
+        "progress_date": progress.progress_date if progress else None,
     }
+
+
+def get_task_from_db(task_id: int, today_iso: Optional[str] = None) -> Optional[dict]:
+    with SessionLocal() as session:
+        task = session.get(TaskRecord, task_id)
+        if task is None:
+            return None
+        return _task_to_dict(session, task, today_iso)
+
+
+def set_task_progress(
+    task_id: int,
+    progress_date: str,
+    pct: int,
+    note: Optional[str],
+) -> Optional[dict]:
+    now = datetime.now(timezone.utc).isoformat()
+    with SessionLocal() as session:
+        task = session.get(TaskRecord, task_id)
+        if task is None:
+            return None
+        row = session.get(TaskProgressRecord, (task_id, progress_date))
+        if row is None:
+            row = TaskProgressRecord(
+                task_id=task_id,
+                progress_date=progress_date,
+            )
+            session.add(row)
+        row.pct = pct
+        row.note = note
+        row.updated_at = now
+        session.commit()
+        # Reflect the row just written (today for recurring, sentinel for one-off).
+        today_iso = (
+            progress_date
+            if task.task_type == "recurring"
+            else date.today().isoformat()
+        )
+        return _task_to_dict(session, task, today_iso)
 
 
 def list_tasks_from_db(status_filter: str = TASK_OPEN) -> list[dict]:
@@ -573,10 +641,16 @@ def delete_task_from_db(task_id: int) -> bool:
         task = session.get(TaskRecord, task_id)
         if task is None:
             return False
-        # Remove source links explicitly (SQLite FK cascade is not relied on).
+        # Remove source links and progress explicitly (SQLite FK cascade is
+        # not relied on).
         session.execute(
             delete(TaskSourceItemRecord).where(
                 TaskSourceItemRecord.task_id == task_id
+            )
+        )
+        session.execute(
+            delete(TaskProgressRecord).where(
+                TaskProgressRecord.task_id == task_id
             )
         )
         session.delete(task)
