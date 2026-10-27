@@ -458,7 +458,10 @@ def test_analyze_empty_inbox(client):
 
 
 def test_analyze_uses_deterministic_fallback_without_openai_key(client):
+    from datetime import date, timedelta
+
     note_text = "Call the team tomorrow"
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
     create_response = client.post("/api/notes", json={"text": note_text})
 
     response = client.post("/api/analyze")
@@ -487,6 +490,12 @@ def test_analyze_uses_deterministic_fallback_without_openai_key(client):
                 "priority": "High",
                 "source_note_ids": [1],
                 "when": None,
+                "bucket": "P0",
+                "due_date": tomorrow,
+                "task_type": "one_off",
+                "recurrence": None,
+                "importance": "normal",
+                "effort_min": 30,
             }
         ],
         "priority_view": {
@@ -590,6 +599,169 @@ def test_task_statuses_survive_reload_and_reanalysis_without_duplicates(client):
     assert len(final_tasks) == 1
     assert final_tasks[0]["id"] == task["id"]
     assert final_tasks[0]["status"] == "dismissed"
+
+
+def test_edit_task_updates_structured_fields(client):
+    client.post("/api/items", json={"raw_text": "Call the team tomorrow"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+
+    response = client.put(
+        f"/api/tasks/{task['id']}",
+        json={
+            "text": "Call the whole team",
+            "bucket": "P1",
+            "task_type": "recurring",
+            "recurrence": "daily",
+            "due_date": None,
+            "importance": "high",
+            "effort_min": 90,
+        },
+    )
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["text"] == "Call the whole team"
+    assert updated["bucket"] == "P1"
+    assert updated["task_type"] == "recurring"
+    assert updated["recurrence"] == "daily"
+    assert updated["due_date"] is None
+    assert updated["importance"] == "high"
+    assert updated["effort_min"] == 90
+    # Persisted across a reload.
+    assert client.get("/api/tasks").json()[0] == updated
+
+
+def test_edit_task_rejects_bad_due_date(client):
+    client.post("/api/items", json={"raw_text": "Call the team tomorrow"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+
+    response = client.put(
+        f"/api/tasks/{task['id']}",
+        json={"due_date": "next friday"},
+    )
+    assert response.status_code == 422
+
+
+def test_edit_missing_task_returns_404(client):
+    response = client.put("/api/tasks/999", json={"bucket": "P0"})
+    assert response.status_code == 404
+
+
+def test_delete_task_removes_it_but_keeps_source_item(client):
+    item = client.post(
+        "/api/items",
+        json={"raw_text": "Call the team tomorrow"},
+    ).json()
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+
+    response = client.delete(f"/api/tasks/{task['id']}")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert client.get("/api/tasks?status=all").json() == []
+    # The underlying note is untouched.
+    assert client.get(f"/api/items").json()[0]["id"] == item["id"]
+
+
+def test_delete_missing_task_returns_404(client):
+    response = client.delete("/api/tasks/999")
+    assert response.status_code == 404
+
+
+def test_log_progress_manual_pct(client):
+    client.post("/api/items", json={"raw_text": "Call the team tomorrow"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+
+    response = client.post(
+        f"/api/tasks/{task['id']}/progress",
+        json={"pct": 60, "note": "Did half"},
+    )
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["progress_pct"] == 60
+    assert updated["progress_note"] == "Did half"
+    assert updated["progress_date"] == "once"  # one-off keeps a single row
+    assert client.get("/api/tasks").json()[0]["progress_pct"] == 60
+
+
+def test_log_progress_estimates_from_note_without_key(client):
+    # No OPENAI_API_KEY in tests, so the keyword fallback is used.
+    client.post("/api/items", json={"raw_text": "Call the team tomorrow"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+
+    response = client.post(
+        f"/api/tasks/{task['id']}/progress",
+        json={"note": "I finished it completely"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["progress_pct"] == 100
+
+
+def test_log_progress_requires_note_or_pct(client):
+    client.post("/api/items", json={"raw_text": "Call the team tomorrow"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+
+    response = client.post(f"/api/tasks/{task['id']}/progress", json={})
+    assert response.status_code == 422
+
+
+def test_log_progress_missing_task_returns_404(client):
+    response = client.post("/api/tasks/999/progress", json={"pct": 50})
+    assert response.status_code == 404
+
+
+def test_recurring_progress_resets_each_day(client):
+    from datetime import date, timedelta
+
+    client.post("/api/items", json={"raw_text": "Study Python daily"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+    assert task["task_type"] == "recurring"
+
+    client.post(
+        f"/api/tasks/{task['id']}/progress",
+        json={"pct": 70},
+    )
+
+    database = sys.modules["app.database"]
+    today = date.today().isoformat()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    # Today reflects the logged progress; a new day starts fresh at 0.
+    assert database.get_task_from_db(task["id"], today)["progress_pct"] == 70
+    assert database.get_task_from_db(task["id"], tomorrow)["progress_pct"] == 0
+
+
+def test_reanalysis_preserves_user_edits_and_progress(client):
+    client.post("/api/items", json={"raw_text": "Call the team tomorrow"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+    task_id = task["id"]
+
+    # The user re-buckets the task, shortens the effort, and logs progress.
+    client.put(
+        f"/api/tasks/{task_id}",
+        json={"bucket": "P2", "effort_min": 5, "importance": "high"},
+    )
+    client.post(f"/api/tasks/{task_id}/progress", json={"pct": 40})
+
+    # Re-running analysis must not clobber those edits or the progress.
+    client.post("/api/analyze")
+
+    after = client.get("/api/tasks").json()
+    assert len(after) == 1
+    assert after[0]["id"] == task_id
+    assert after[0]["bucket"] == "P2"
+    assert after[0]["effort_min"] == 5
+    assert after[0]["importance"] == "high"
+    assert after[0]["progress_pct"] == 40
 
 
 def test_reanalysis_updates_task_by_source_without_changing_status(

@@ -67,6 +67,9 @@ class InboxItem(BaseModel):
 
 
 Priority = Literal["High", "Medium", "Low"]
+Bucket = Literal["P0", "P1", "P2"]
+TaskType = Literal["recurring", "one_off"]
+Importance = Literal["high", "normal"]
 AnalysisMode = Literal[
     "openai",
     "fallback_no_api_call",
@@ -95,6 +98,13 @@ class AnalysisTodo(StrictAnalysisModel):
     priority: Priority
     source_note_ids: List[int] = Field(min_length=1)
     when: Optional[str] = None
+    # Structured scheduling fields (optional so older payloads still validate).
+    bucket: Optional[Bucket] = None
+    due_date: Optional[str] = None
+    task_type: TaskType = "one_off"
+    recurrence: Optional[str] = None
+    importance: Importance = "normal"
+    effort_min: Optional[int] = Field(default=None, ge=0)
 
 
 class AnalysisPriorityItem(StrictAnalysisModel):
@@ -175,3 +185,69 @@ class Task(BaseModel):
     source_item_ids: List[int]
     created_at: str
     updated_at: str
+    bucket: Optional[Bucket] = None
+    due_date: Optional[str] = None
+    task_type: TaskType = "one_off"
+    recurrence: Optional[str] = None
+    importance: Importance = "normal"
+    effort_min: Optional[int] = None
+    progress_pct: int = 0
+    progress_note: Optional[str] = None
+    progress_date: Optional[str] = None
+
+
+class TaskProgressUpdate(BaseModel):
+    """Log progress on a task: a note (AI-estimated %) and/or a manual %."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note: Optional[str] = Field(default=None, max_length=1000)
+    pct: Optional[int] = Field(default=None, ge=0, le=100)
+    date: Optional[str] = None
+
+    @field_validator("date")
+    @classmethod
+    def validate_date(cls, value: Optional[str]) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        import re
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError("date must be an ISO date (YYYY-MM-DD)")
+        return value
+
+    @model_validator(mode="after")
+    def require_note_or_pct(self):
+        if self.pct is None and (self.note is None or not self.note.strip()):
+            raise ValueError("Provide a progress note or a percentage")
+        return self
+
+
+class TaskUpdate(BaseModel):
+    """Fields a user may edit on a task; all optional (only sent ones apply)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    bucket: Optional[Bucket] = None
+    due_date: Optional[str] = None
+    task_type: Optional[TaskType] = None
+    recurrence: Optional[str] = None
+    importance: Optional[Importance] = None
+    effort_min: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("due_date")
+    @classmethod
+    def validate_due_date(cls, value: Optional[str]) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        import re
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError("due_date must be an ISO date (YYYY-MM-DD)")
+        return value
+
+    @field_validator("text")
+    @classmethod
+    def reject_whitespace_only_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("Task text must contain non-whitespace characters")
+        return value
