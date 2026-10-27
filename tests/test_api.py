@@ -601,6 +601,76 @@ def test_task_statuses_survive_reload_and_reanalysis_without_duplicates(client):
     assert final_tasks[0]["status"] == "dismissed"
 
 
+def test_edit_task_updates_structured_fields(client):
+    client.post("/api/items", json={"raw_text": "Call the team tomorrow"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+
+    response = client.put(
+        f"/api/tasks/{task['id']}",
+        json={
+            "text": "Call the whole team",
+            "bucket": "P1",
+            "task_type": "recurring",
+            "recurrence": "daily",
+            "due_date": None,
+            "importance": "high",
+            "effort_min": 90,
+        },
+    )
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["text"] == "Call the whole team"
+    assert updated["bucket"] == "P1"
+    assert updated["task_type"] == "recurring"
+    assert updated["recurrence"] == "daily"
+    assert updated["due_date"] is None
+    assert updated["importance"] == "high"
+    assert updated["effort_min"] == 90
+    # Persisted across a reload.
+    assert client.get("/api/tasks").json()[0] == updated
+
+
+def test_edit_task_rejects_bad_due_date(client):
+    client.post("/api/items", json={"raw_text": "Call the team tomorrow"})
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+
+    response = client.put(
+        f"/api/tasks/{task['id']}",
+        json={"due_date": "next friday"},
+    )
+    assert response.status_code == 422
+
+
+def test_edit_missing_task_returns_404(client):
+    response = client.put("/api/tasks/999", json={"bucket": "P0"})
+    assert response.status_code == 404
+
+
+def test_delete_task_removes_it_but_keeps_source_item(client):
+    item = client.post(
+        "/api/items",
+        json={"raw_text": "Call the team tomorrow"},
+    ).json()
+    client.post("/api/analyze")
+    task = client.get("/api/tasks").json()[0]
+
+    response = client.delete(f"/api/tasks/{task['id']}")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert client.get("/api/tasks?status=all").json() == []
+    # The underlying note is untouched.
+    assert client.get(f"/api/items").json()[0]["id"] == item["id"]
+
+
+def test_delete_missing_task_returns_404(client):
+    response = client.delete("/api/tasks/999")
+    assert response.status_code == 404
+
+
 def test_reanalysis_updates_task_by_source_without_changing_status(
     client, monkeypatch
 ):

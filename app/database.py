@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    delete,
     or_,
     select,
 )
@@ -536,6 +537,51 @@ def list_tasks_from_db(status_filter: str = TASK_OPEN) -> list[dict]:
             statement = statement.where(TaskRecord.status == status_filter)
         tasks = session.scalars(statement).all()
         return [_task_to_dict(session, task) for task in tasks]
+
+
+_EDITABLE_TASK_FIELDS = {
+    "text",
+    "bucket",
+    "due_date",
+    "task_type",
+    "recurrence",
+    "importance",
+    "effort_min",
+}
+
+
+def update_task_in_db(task_id: int, fields: dict) -> Optional[dict]:
+    """Apply user edits to a task. Only known editable fields are written."""
+    updates = {
+        key: value
+        for key, value in fields.items()
+        if key in _EDITABLE_TASK_FIELDS
+    }
+    with SessionLocal() as session:
+        task = session.get(TaskRecord, task_id)
+        if task is None:
+            return None
+        for key, value in updates.items():
+            setattr(task, key, value)
+        task.updated_at = datetime.now(timezone.utc).isoformat()
+        session.commit()
+        return _task_to_dict(session, task)
+
+
+def delete_task_from_db(task_id: int) -> bool:
+    with SessionLocal() as session:
+        task = session.get(TaskRecord, task_id)
+        if task is None:
+            return False
+        # Remove source links explicitly (SQLite FK cascade is not relied on).
+        session.execute(
+            delete(TaskSourceItemRecord).where(
+                TaskSourceItemRecord.task_id == task_id
+            )
+        )
+        session.delete(task)
+        session.commit()
+        return True
 
 
 def set_task_status(task_id: int, task_status: str) -> Optional[dict]:

@@ -1,6 +1,7 @@
 let isSavingNote = false;
 let isAnalyzingInbox = false;
 let lastTasks = [];
+let editingTaskId = null;
 const pendingNoteActions = new Set();
 const pendingTaskActions = new Set();
 const itemFilterFields = {
@@ -414,6 +415,11 @@ function renderTask(task) {
   const actions = document.createElement('div');
   actions.className = 'task-actions';
 
+  actions.append(
+    actionButton('Edit', 'secondary', () => {
+      openTaskModal(task.id);
+    })
+  );
   if (task.status === 'open') {
     actions.append(
       actionButton('Complete', '', () => {
@@ -430,6 +436,11 @@ function renderTask(task) {
       })
     );
   }
+  actions.append(
+    actionButton('Delete', 'danger', () => {
+      deleteTask(task.id);
+    })
+  );
 
   root.append(content, meta, actions);
   return root;
@@ -563,7 +574,17 @@ function weekTaskHtml(task, showDate) {
   const doneClass = task.status === 'completed' ? ' week-task-done' : '';
   return `<div class="week-task${doneClass}">${bucketPillHtml(task)}` +
     `<span class="week-task-text">${esc(task.text)}</span>` +
-    `<span class="week-task-meta">${schedText}${effort}</span></div>`;
+    `<span class="week-task-meta">${schedText}${effort}</span>` +
+    taskHoverActionsHtml(task.id) +
+    `</div>`;
+}
+
+function taskHoverActionsHtml(taskId) {
+  return `<span class="task-hover-actions">` +
+    `<button type="button" title="Edit" aria-label="Edit task" onclick="openTaskModal(${taskId})">✎</button>` +
+    `<button type="button" title="Complete" aria-label="Complete task" onclick="completeTask(${taskId})">✓</button>` +
+    `<button type="button" title="Delete" aria-label="Delete task" onclick="deleteTask(${taskId})">🗑</button>` +
+    `</span>`;
 }
 
 function renderWeek(tasks) {
@@ -645,6 +666,125 @@ function renderWeek(tasks) {
   }
 
   root.innerHTML = `<div class="week-grid">${dayCards}</div>${backlogHtml}`;
+}
+
+// --- Task actions & edit modal ----------------------------------------------
+
+async function completeTask(taskId) {
+  if (pendingTaskActions.has(taskId)) return;
+  pendingTaskActions.add(taskId);
+  setStatus('taskStatus', 'Updating task…');
+  try {
+    await fetchJson(
+      `/api/tasks/${taskId}/complete`,
+      {method: 'POST'},
+      'Unable to complete task.'
+    );
+    setStatus('taskStatus', 'Task completed.');
+    await loadTasks();
+  } catch {
+    setStatus('taskStatus', 'We could not complete this task.', true);
+  } finally {
+    pendingTaskActions.delete(taskId);
+  }
+}
+
+async function deleteTask(taskId) {
+  if (!window.confirm('Delete this task? This cannot be undone.')) return;
+  if (pendingTaskActions.has(taskId)) return;
+  pendingTaskActions.add(taskId);
+  setStatus('taskStatus', 'Deleting task…');
+  try {
+    await fetchJson(
+      `/api/tasks/${taskId}`,
+      {method: 'DELETE'},
+      'Unable to delete task.'
+    );
+    setStatus('taskStatus', 'Task deleted.');
+    await loadTasks();
+  } catch {
+    setStatus('taskStatus', 'We could not delete this task.', true);
+  } finally {
+    pendingTaskActions.delete(taskId);
+  }
+}
+
+function onEditTypeChange() {
+  const type = document.getElementById('editType').value;
+  const recurring = type === 'recurring';
+  document.getElementById('editDueWrap').style.display = recurring ? 'none' : '';
+  document.getElementById('editRecurrenceWrap').style.display =
+    recurring ? '' : 'none';
+}
+
+function openTaskModal(taskId) {
+  const task = lastTasks.find(t => t.id === taskId);
+  if (!task) return;
+  editingTaskId = taskId;
+  document.getElementById('editText').value = task.text || '';
+  document.getElementById('editBucket').value = task.bucket || 'P1';
+  document.getElementById('editType').value = task.task_type || 'one_off';
+  document.getElementById('editDue').value = task.due_date || '';
+  document.getElementById('editRecurrence').value = task.recurrence || 'daily';
+  document.getElementById('editImportance').checked = task.importance === 'high';
+  document.getElementById('editEffort').value =
+    task.effort_min != null ? task.effort_min : '';
+  onEditTypeChange();
+  setStatus('editStatus', '');
+  document.getElementById('taskModalBackdrop').hidden = false;
+}
+
+function closeTaskModal() {
+  document.getElementById('taskModalBackdrop').hidden = true;
+  editingTaskId = null;
+}
+
+function onModalBackdropClick(event) {
+  if (event.target.id === 'taskModalBackdrop') closeTaskModal();
+}
+
+async function saveTaskEdit() {
+  if (editingTaskId == null) return;
+  const text = document.getElementById('editText').value.trim();
+  if (!text) {
+    setStatus('editStatus', 'Task text is required.', true);
+    return;
+  }
+  const type = document.getElementById('editType').value;
+  const payload = {
+    text,
+    bucket: document.getElementById('editBucket').value,
+    task_type: type,
+    importance: document.getElementById('editImportance').checked
+      ? 'high'
+      : 'normal'
+  };
+  if (type === 'recurring') {
+    payload.recurrence = document.getElementById('editRecurrence').value;
+    payload.due_date = null;
+  } else {
+    payload.recurrence = null;
+    payload.due_date = document.getElementById('editDue').value || null;
+  }
+  const effortRaw = document.getElementById('editEffort').value;
+  if (effortRaw !== '') payload.effort_min = Number(effortRaw);
+
+  try {
+    await fetchJson(
+      `/api/tasks/${editingTaskId}`,
+      {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      },
+      'Unable to save task.'
+    );
+    closeTaskModal();
+    setStatus('taskStatus', 'Task updated.');
+    await loadTasks();
+  } catch {
+    setStatus('editStatus', 'Could not save changes. Please try again.', true);
+  }
 }
 
 function renderAnalysis(data) {

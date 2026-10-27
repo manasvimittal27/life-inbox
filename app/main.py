@@ -12,6 +12,7 @@ from app.database import (
     complete_analysis_run,
     delete_item_from_db,
     delete_note_from_db,
+    delete_task_from_db,
     fail_analysis_run,
     get_latest_successful_analysis,
     init_db,
@@ -22,6 +23,7 @@ from app.database import (
     start_analysis_run,
     update_item_in_db,
     update_note_in_db,
+    update_task_in_db,
 )
 from app.organizer import analyze_inbox_with_openai, validate_analysis_result
 from app.schemas import (
@@ -35,6 +37,7 @@ from app.schemas import (
     Priority,
     Task,
     TaskListStatus,
+    TaskUpdate,
 )
 
 
@@ -229,6 +232,39 @@ def reopen_task(task_id: int):
 @app.post("/api/tasks/{task_id}/dismiss", response_model=Task)
 def dismiss_task(task_id: int):
     return _transition_task(task_id, "dismissed")
+
+
+@app.put("/api/tasks/{task_id}", response_model=Task)
+def edit_task(task_id: int, payload: TaskUpdate):
+    fields = payload.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update.")
+    try:
+        task = update_task_in_db(task_id, fields)
+    except Exception as exc:
+        logger.exception("Failed to update task")
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to update task. Please try again.",
+        ) from exc
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return task
+
+
+@app.delete("/api/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(task_id: int):
+    try:
+        deleted = delete_task_from_db(task_id)
+    except Exception as exc:
+        logger.exception("Failed to delete task")
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to delete task. Please try again.",
+        ) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get(

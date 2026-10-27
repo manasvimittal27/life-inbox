@@ -52,3 +52,22 @@ ul { padding-left: 22px; }
 .muted { color: #666; }
 .status { min-height: 20px; margin: 8px 0 0; }
 .status.error { color: #b42318; }
+
+/* Hover actions on tasks */
+.task-hover-actions { display: none; margin-left: auto; gap: 2px; }
+.week-task:hover .task-hover-actions,
+.week-task:focus-within .task-hover-actions { display: inline-flex; }
+.task-hover-actions button { margin: 0; padding: 1px 6px; font-size: 12px; background: #eef2f7; color: #333; border-radius: 6px; font-weight: 600; }
+.task-hover-actions button:hover { background: #dde6ee; }
+
+/* Edit modal */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 100; }
+.modal-backdrop[hidden] { display: none; }
+.modal { background: white; border-radius: 12px; padding: 20px; width: 100%; max-width: 420px; max-height: 90vh; overflow: auto; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
+.modal h3 { margin-top: 0; }
+.modal-field { display: grid; gap: 5px; margin-bottom: 12px; color: #333; font-size: 14px; }
+.modal-field input, .modal-field select, .modal-field textarea { padding: 8px 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 14px; box-sizing: border-box; }
+.modal-field textarea { min-height: 60px; }
+.modal-check { grid-auto-flow: column; justify-content: start; align-items: center; gap: 8px; }
+.modal-actions { display: flex; gap: 8px; margin-top: 4px; }
+.modal-actions button { margin-top: 0; }

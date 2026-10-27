@@ -191,3 +191,34 @@ class Task(BaseModel):
     recurrence: Optional[str] = None
     importance: Importance = "normal"
     effort_min: Optional[int] = None
+
+
+class TaskUpdate(BaseModel):
+    """Fields a user may edit on a task; all optional (only sent ones apply)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    bucket: Optional[Bucket] = None
+    due_date: Optional[str] = None
+    task_type: Optional[TaskType] = None
+    recurrence: Optional[str] = None
+    importance: Optional[Importance] = None
+    effort_min: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("due_date")
+    @classmethod
+    def validate_due_date(cls, value: Optional[str]) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        import re
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError("due_date must be an ISO date (YYYY-MM-DD)")
+        return value
+
+    @field_validator("text")
+    @classmethod
+    def reject_whitespace_only_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("Task text must contain non-whitespace characters")
+        return value

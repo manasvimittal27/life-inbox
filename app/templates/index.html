@@ -85,6 +85,55 @@
     <div id="notes"></div>
   </div>
 
+  <div id="taskModalBackdrop" class="modal-backdrop" hidden onclick="onModalBackdropClick(event)">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="taskModalTitle">
+      <h3 id="taskModalTitle">Edit task</h3>
+      <label class="modal-field">
+        Task
+        <textarea id="editText" maxlength="500"></textarea>
+      </label>
+      <label class="modal-field">
+        Bucket
+        <select id="editBucket">
+          <option value="P0">P0 — Urgent / deadline</option>
+          <option value="P1">P1 — Important deep work</option>
+          <option value="P2">P2 — Operational / hobby</option>
+        </select>
+      </label>
+      <label class="modal-field">
+        Type
+        <select id="editType" onchange="onEditTypeChange()">
+          <option value="one_off">One-off</option>
+          <option value="recurring">Recurring</option>
+        </select>
+      </label>
+      <label class="modal-field" id="editDueWrap">
+        Due date
+        <input type="date" id="editDue" />
+      </label>
+      <label class="modal-field" id="editRecurrenceWrap">
+        Repeat
+        <select id="editRecurrence">
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+        </select>
+      </label>
+      <label class="modal-field modal-check">
+        <input type="checkbox" id="editImportance" />
+        Mark as crucial (high importance)
+      </label>
+      <label class="modal-field">
+        Effort (minutes)
+        <input type="number" id="editEffort" min="0" step="5" />
+      </label>
+      <div class="modal-actions">
+        <button type="button" onclick="saveTaskEdit()">Save</button>
+        <button type="button" class="secondary" onclick="closeTaskModal()">Cancel</button>
+      </div>
+      <p id="editStatus" class="status muted" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>
