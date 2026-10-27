@@ -15,6 +15,11 @@
     <br />
     <button id="addNoteButton" type="button" onclick="addNote()">Add Note</button>
     <button id="analyzeButton" type="button" class="secondary" onclick="analyzeInbox()">Analyze Entire Inbox with AI</button>
+    <div class="upload-row">
+      <input type="file" id="fileInput" accept="image/*,application/pdf" />
+      <button id="uploadButton" type="button" class="secondary" onclick="uploadFile()">Read file &amp; add</button>
+      <span class="muted small">Image or PDF — a screenshot, photo, or document.</span>
+    </div>
     <p id="noteStatus" class="status muted" role="status" aria-live="polite"></p>
 
     <h2>AI-organized inbox</h2>

@@ -219,6 +219,44 @@ function actionButton(label, className, onClick) {
   return button;
 }
 
+async function uploadFile() {
+  const input = document.getElementById('fileInput');
+  const file = input.files && input.files[0];
+  if (!file) {
+    setStatus('noteStatus', 'Choose an image or PDF first.', true);
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  setButtonBusy('uploadButton', true, 'Reading…', 'Read file & add');
+  setStatus('noteStatus', `Reading ${file.name}…`);
+  try {
+    const items = await fetchJson(
+      '/api/items/upload',
+      {method: 'POST', body: formData},
+      'Unable to read the file.'
+    );
+    input.value = '';
+    const count = Array.isArray(items) ? items.length : 1;
+    setStatus(
+      'noteStatus',
+      `Added ${count} item${count === 1 ? '' : 's'} from ${file.name}. ` +
+      'Click “Analyze Entire Inbox with AI” to organize them.'
+    );
+    await loadNotes();
+  } catch {
+    setStatus(
+      'noteStatus',
+      'We could not read that file. Please try another image or PDF.',
+      true
+    );
+  } finally {
+    setButtonBusy('uploadButton', false, 'Reading…', 'Read file & add');
+  }
+}
+
 function renderNote(note) {
   const root = document.createElement('div');
   root.className = 'note';
@@ -230,7 +268,10 @@ function renderNote(note) {
 
   const time = document.createElement('div');
   time.className = 'time';
-  time.textContent = `#${note.id} · ${note.created_at}`;
+  const source = note.original_filename
+    ? ` · 📎 ${note.original_filename}`
+    : '';
+  time.textContent = `#${note.id} · ${note.created_at}${source}`;
 
   const actions = document.createElement('div');
   actions.className = 'note-actions';
@@ -1098,7 +1139,7 @@ async function loadNotes(
       return true;
     }
 
-    for (const note of notes.filter(item => item.item_type === 'text')) {
+    for (const note of notes.filter(item => item.raw_text)) {
       root.appendChild(renderNote(note));
     }
     setStatus(
