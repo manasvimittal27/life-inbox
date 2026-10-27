@@ -250,6 +250,55 @@ def estimate_progress(task_text: str, note: str) -> int:
         return _fallback_progress(note)
 
 
+FILE_EXTRACTION_PROMPT = (
+    "You are reading a file a person added to their personal task inbox "
+    "(a photo, screenshot, or document). Transcribe its actionable content as "
+    "plain text, exactly as if the person had typed quick notes to themselves: "
+    "tasks, deadlines, dates, names, amounts, and key details. Keep it concise "
+    "and factual, one item per line. Do not add commentary, headings, or "
+    "explanation — output only the extracted notes. If there is nothing "
+    "actionable or readable, reply with an empty response."
+)
+
+
+def extract_content_from_file(data: bytes, mime: str, filename: str) -> str:
+    """Use the vision model to turn an image/PDF into plain-text inbox notes."""
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("An OpenAI API key is required to read uploaded files")
+
+    import base64
+    from openai import OpenAI
+
+    client = OpenAI()
+    b64 = base64.b64encode(data).decode("ascii")
+
+    if mime == "application/pdf":
+        file_part = {
+            "type": "input_file",
+            "filename": filename or "upload.pdf",
+            "file_data": f"data:application/pdf;base64,{b64}",
+        }
+    else:
+        file_part = {
+            "type": "input_image",
+            "image_url": f"data:{mime};base64,{b64}",
+        }
+
+    response = client.responses.create(
+        model=MODEL,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": FILE_EXTRACTION_PROMPT},
+                    file_part,
+                ],
+            }
+        ],
+    )
+    return (response.output_text or "").strip()
+
+
 def validate_analysis_result(result: dict, notes: list[dict]) -> dict:
     validated = AnalysisResult.model_validate(result)
     validated.validate_for_item_ids({note["id"] for note in notes})

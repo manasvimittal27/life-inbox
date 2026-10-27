@@ -14,6 +14,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     delete,
+    func,
     or_,
     select,
 )
@@ -37,6 +38,8 @@ Base = declarative_base()
 
 
 TEXT_ITEM_TYPE = "text"
+IMAGE_ITEM_TYPE = "image"
+PDF_ITEM_TYPE = "pdf"
 READY_STATUS = "ready"
 ANALYSIS_RUNNING = "running"
 ANALYSIS_SUCCEEDED = "succeeded"
@@ -193,6 +196,27 @@ def add_item_to_db(raw_text: str) -> dict:
         return _item_to_dict(item)
 
 
+def add_file_item_to_db(
+    raw_text: str,
+    item_type: str,
+    original_filename: Optional[str],
+    mime_type: Optional[str],
+) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    with SessionLocal() as session:
+        item = InboxItemRecord(
+            item_type=item_type,
+            raw_text=raw_text,
+            original_filename=original_filename,
+            mime_type=mime_type,
+            processing_status=READY_STATUS,
+            created_at=now,
+        )
+        session.add(item)
+        session.commit()
+        return _item_to_dict(item)
+
+
 def list_items_from_db(
     search: Optional[str] = None,
     item_type: Optional[str] = None,
@@ -268,6 +292,37 @@ def delete_item_from_db(item_id: int) -> bool:
         insight = session.get(ItemInsightRecord, item_id)
         if insight is not None:
             session.delete(insight)
+
+        # Unlink this item from any tasks, and delete tasks that are left with
+        # no source items (SQLite FK cascade is not relied on).
+        linked_task_ids = set(
+            session.scalars(
+                select(TaskSourceItemRecord.task_id).where(
+                    TaskSourceItemRecord.item_id == item_id
+                )
+            ).all()
+        )
+        session.execute(
+            delete(TaskSourceItemRecord).where(
+                TaskSourceItemRecord.item_id == item_id
+            )
+        )
+        for task_id in linked_task_ids:
+            remaining = session.scalar(
+                select(func.count())
+                .select_from(TaskSourceItemRecord)
+                .where(TaskSourceItemRecord.task_id == task_id)
+            )
+            if not remaining:
+                session.execute(
+                    delete(TaskProgressRecord).where(
+                        TaskProgressRecord.task_id == task_id
+                    )
+                )
+                task = session.get(TaskRecord, task_id)
+                if task is not None:
+                    session.delete(task)
+
         session.delete(item)
         session.commit()
         return True
@@ -286,10 +341,12 @@ def add_note_to_db(text: str) -> dict:
 
 
 def list_notes_from_db() -> list[dict]:
+    # Any item that has extracted text (typed notes and uploaded files alike)
+    # feeds the analysis pipeline.
     return [
         _item_to_note(item)
         for item in list_items_from_db()
-        if item["item_type"] == TEXT_ITEM_TYPE
+        if item["raw_text"]
     ]
 
 

@@ -1174,3 +1174,97 @@ def test_openai_failure_fallback_omits_technical_details(monkeypatch):
     assert result["mode"] == "fallback_after_api_error"
     assert "error" not in result
     assert "super-secret" not in repr(result)
+
+
+def test_upload_image_creates_item_and_feeds_analysis(client, monkeypatch):
+    main = sys.modules["app.main"]
+    monkeypatch.setattr(
+        main,
+        "extract_content_from_file",
+        lambda data, mime, filename: "Call the dentist tomorrow",
+    )
+
+    response = client.post(
+        "/api/items/upload",
+        files={"file": ("note.png", b"\x89PNG\r\n\x1a\nfake", "image/png")},
+    )
+
+    assert response.status_code == 200
+    items = response.json()
+    assert len(items) == 1
+    item = items[0]
+    assert item["item_type"] == "image"
+    assert item["raw_text"] == "Call the dentist tomorrow"
+    assert item["original_filename"] == "note.png"
+    assert item["mime_type"] == "image/png"
+
+    # The extracted content flows through the normal analysis pipeline.
+    client.post("/api/analyze")
+    tasks = client.get("/api/tasks").json()
+    assert any("dentist" in t["text"].lower() for t in tasks)
+
+
+def test_upload_splits_lines_into_separate_items(client, monkeypatch):
+    main = sys.modules["app.main"]
+    monkeypatch.setattr(
+        main,
+        "extract_content_from_file",
+        lambda data, mime, filename: "Buy milk\nCall Sam\n\nPay the bill",
+    )
+
+    response = client.post(
+        "/api/items/upload",
+        files={"file": ("list.png", b"\x89PNGfake", "image/png")},
+    )
+
+    assert response.status_code == 200
+    items = response.json()
+    assert [i["raw_text"] for i in items] == ["Buy milk", "Call Sam", "Pay the bill"]
+
+
+def test_upload_pdf_sets_pdf_item_type(client, monkeypatch):
+    main = sys.modules["app.main"]
+    monkeypatch.setattr(
+        main,
+        "extract_content_from_file",
+        lambda data, mime, filename: "Pay rent on the 1st",
+    )
+
+    response = client.post(
+        "/api/items/upload",
+        files={"file": ("bill.pdf", b"%PDF-1.4 fake", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["item_type"] == "pdf"
+
+
+def test_upload_rejects_unsupported_type(client):
+    response = client.post(
+        "/api/items/upload",
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+    assert response.status_code == 415
+
+
+def test_upload_rejects_empty_file(client):
+    response = client.post(
+        "/api/items/upload",
+        files={"file": ("empty.png", b"", "image/png")},
+    )
+    assert response.status_code == 400
+
+
+def test_deleting_item_removes_its_orphaned_task(client):
+    item = client.post(
+        "/api/items",
+        json={"raw_text": "Call the team tomorrow"},
+    ).json()
+    client.post("/api/analyze")
+    assert len(client.get("/api/tasks?status=all").json()) == 1
+
+    response = client.delete(f"/api/items/{item['id']}")
+
+    assert response.status_code == 204
+    # The task backed only by that item is cleaned up, not orphaned.
+    assert client.get("/api/tasks?status=all").json() == []
