@@ -15,6 +15,11 @@
     <br />
     <button id="addNoteButton" type="button" onclick="addNote()">Add Note</button>
     <button id="analyzeButton" type="button" class="secondary" onclick="analyzeInbox()">Analyze Entire Inbox with AI</button>
+    <div class="upload-row">
+      <input type="file" id="fileInput" accept="image/*,application/pdf" />
+      <button id="uploadButton" type="button" class="secondary" onclick="uploadFile()">Read file &amp; add</button>
+      <span class="muted small">Image or PDF — a screenshot, photo, or document.</span>
+    </div>
     <p id="noteStatus" class="status muted" role="status" aria-live="polite"></p>
 
     <h2>AI-organized inbox</h2>
@@ -23,8 +28,22 @@
       <span class="muted">Save a few notes, then click “Analyze Entire Inbox with AI”.</span>
     </div>
 
+    <h2>Today at a glance</h2>
+    <div class="panel time-panel">
+      <label class="time-budget">
+        Awake hours today
+        <input type="number" id="dayBudget" min="1" max="24" step="0.5" value="16" oninput="renderTimePie()" />
+      </label>
+      <div id="timePie"></div>
+    </div>
+
     <h2>Tasks</h2>
     <div class="task-toolbar">
+      <label for="taskViewMode">View</label>
+      <select id="taskViewMode" onchange="changeTaskView()">
+        <option value="week">Week</option>
+        <option value="list">List</option>
+      </select>
       <label for="taskStatusFilter">Show</label>
       <select id="taskStatusFilter" onchange="changeTaskStatusFilter()">
         <option value="open">Open</option>
@@ -33,6 +52,7 @@
       </select>
     </div>
     <p id="taskStatus" class="status muted" role="status" aria-live="polite"></p>
+    <div id="weekView"></div>
     <div id="tasks"></div>
 
     <h2>Raw saved notes</h2>
@@ -77,6 +97,71 @@
     </form>
     <p id="searchStatus" class="status muted" role="status" aria-live="polite"></p>
     <div id="notes"></div>
+  </div>
+
+  <div id="taskModalBackdrop" class="modal-backdrop" hidden onclick="onModalBackdropClick(event)">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="taskModalTitle">
+      <h3 id="taskModalTitle">Edit task</h3>
+      <label class="modal-field">
+        Task
+        <textarea id="editText" maxlength="500"></textarea>
+      </label>
+      <label class="modal-field">
+        Bucket
+        <select id="editBucket">
+          <option value="P0">P0 — Urgent / deadline</option>
+          <option value="P1">P1 — Important deep work</option>
+          <option value="P2">P2 — Operational / hobby</option>
+        </select>
+      </label>
+      <label class="modal-field">
+        Type
+        <select id="editType" onchange="onEditTypeChange()">
+          <option value="one_off">One-off</option>
+          <option value="recurring">Recurring</option>
+        </select>
+      </label>
+      <label class="modal-field" id="editDueWrap">
+        Due date
+        <input type="date" id="editDue" />
+      </label>
+      <label class="modal-field" id="editRecurrenceWrap">
+        Repeat
+        <select id="editRecurrence">
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+        </select>
+      </label>
+      <label class="modal-field modal-check">
+        <input type="checkbox" id="editImportance" />
+        Mark as crucial (high importance)
+      </label>
+      <label class="modal-field">
+        Effort (minutes)
+        <input type="number" id="editEffort" min="0" step="5" />
+      </label>
+      <div class="modal-actions">
+        <button type="button" onclick="saveTaskEdit()">Save</button>
+        <button type="button" class="secondary" onclick="closeTaskModal()">Cancel</button>
+      </div>
+
+      <div class="modal-progress">
+        <h4>Progress (today)</h4>
+        <label class="modal-field">
+          Progress note
+          <textarea id="editProgressNote" maxlength="1000" placeholder="e.g. Watched 3 DSA lectures"></textarea>
+        </label>
+        <label class="modal-field">
+          % complete
+          <input type="number" id="editProgressPct" min="0" max="100" step="5" />
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="secondary" onclick="logProgress()">Log progress</button>
+        </div>
+        <p class="muted small">Leave % blank to let AI estimate it from your note.</p>
+      </div>
+      <p id="editStatus" class="status muted" role="status" aria-live="polite"></p>
+    </div>
   </div>
 
   <script src="/static/app.js"></script>

@@ -1,7 +1,7 @@
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +13,8 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    delete,
+    func,
     or_,
     select,
 )
@@ -36,6 +38,8 @@ Base = declarative_base()
 
 
 TEXT_ITEM_TYPE = "text"
+IMAGE_ITEM_TYPE = "image"
+PDF_ITEM_TYPE = "pdf"
 READY_STATUS = "ready"
 ANALYSIS_RUNNING = "running"
 ANALYSIS_SUCCEEDED = "succeeded"
@@ -116,6 +120,13 @@ class TaskRecord(Base):
     dedup_key = Column(Text, nullable=False)
     created_at = Column(Text, nullable=False)
     updated_at = Column(Text, nullable=False)
+    # Structured scheduling fields (migration 0007).
+    bucket = Column(Text, nullable=True)
+    due_date = Column(Text, nullable=True)
+    task_type = Column(Text, nullable=False, server_default="one_off")
+    recurrence = Column(Text, nullable=True)
+    importance = Column(Text, nullable=False, server_default="normal")
+    effort_min = Column(Integer, nullable=False, server_default="60")
 
 
 class TaskSourceItemRecord(Base):
@@ -134,6 +145,21 @@ class TaskSourceItemRecord(Base):
         ForeignKey("inbox_items.id", ondelete="CASCADE"),
         primary_key=True,
     )
+
+
+class TaskProgressRecord(Base):
+    __tablename__ = "task_progress"
+
+    task_id = Column(
+        Integer,
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # ISO date for recurring tasks; the sentinel "once" for one-off tasks.
+    progress_date = Column(Text, primary_key=True)
+    pct = Column(Integer, nullable=False)
+    note = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False)
 
 
 def init_db():
@@ -162,6 +188,27 @@ def add_item_to_db(raw_text: str) -> dict:
         item = InboxItemRecord(
             item_type=TEXT_ITEM_TYPE,
             raw_text=raw_text,
+            processing_status=READY_STATUS,
+            created_at=now,
+        )
+        session.add(item)
+        session.commit()
+        return _item_to_dict(item)
+
+
+def add_file_item_to_db(
+    raw_text: str,
+    item_type: str,
+    original_filename: Optional[str],
+    mime_type: Optional[str],
+) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    with SessionLocal() as session:
+        item = InboxItemRecord(
+            item_type=item_type,
+            raw_text=raw_text,
+            original_filename=original_filename,
+            mime_type=mime_type,
             processing_status=READY_STATUS,
             created_at=now,
         )
@@ -245,6 +292,37 @@ def delete_item_from_db(item_id: int) -> bool:
         insight = session.get(ItemInsightRecord, item_id)
         if insight is not None:
             session.delete(insight)
+
+        # Unlink this item from any tasks, and delete tasks that are left with
+        # no source items (SQLite FK cascade is not relied on).
+        linked_task_ids = set(
+            session.scalars(
+                select(TaskSourceItemRecord.task_id).where(
+                    TaskSourceItemRecord.item_id == item_id
+                )
+            ).all()
+        )
+        session.execute(
+            delete(TaskSourceItemRecord).where(
+                TaskSourceItemRecord.item_id == item_id
+            )
+        )
+        for task_id in linked_task_ids:
+            remaining = session.scalar(
+                select(func.count())
+                .select_from(TaskSourceItemRecord)
+                .where(TaskSourceItemRecord.task_id == task_id)
+            )
+            if not remaining:
+                session.execute(
+                    delete(TaskProgressRecord).where(
+                        TaskProgressRecord.task_id == task_id
+                    )
+                )
+                task = session.get(TaskRecord, task_id)
+                if task is not None:
+                    session.delete(task)
+
         session.delete(item)
         session.commit()
         return True
@@ -263,10 +341,12 @@ def add_note_to_db(text: str) -> dict:
 
 
 def list_notes_from_db() -> list[dict]:
+    # Any item that has extracted text (typed notes and uploaded files alike)
+    # feeds the analysis pipeline.
     return [
         _item_to_note(item)
         for item in list_items_from_db()
-        if item["item_type"] == TEXT_ITEM_TYPE
+        if item["raw_text"]
     ]
 
 
@@ -341,6 +421,8 @@ def complete_analysis_run(run_id: int, result: dict) -> dict:
                 .order_by(TaskRecord.id.asc())
             ).all()
 
+            structured = _structured_task_fields(todo)
+
             if not existing_tasks:
                 task = TaskRecord(
                     text=todo["task"],
@@ -350,6 +432,7 @@ def complete_analysis_run(run_id: int, result: dict) -> dict:
                     dedup_key=_task_dedup_key(source_item_ids),
                     created_at=completed_at,
                     updated_at=completed_at,
+                    **structured,
                 )
                 session.add(task)
                 session.flush()
@@ -368,6 +451,9 @@ def complete_analysis_run(run_id: int, result: dict) -> dict:
                         TaskSourceItemRecord.task_id == task.id
                     )
                 ).all()
+                # Refresh the wording/priority from the (possibly edited) note,
+                # but PRESERVE the structured scheduling fields, status, and
+                # progress so re-analysis never clobbers the user's own edits.
                 changed = (
                     task.text != todo["task"]
                     or task.priority != todo["priority"]
@@ -448,6 +534,29 @@ def get_latest_successful_analysis() -> Optional[dict]:
         }
 
 
+_PRIORITY_TO_BUCKET = {"High": "P0", "Medium": "P1", "Low": "P2"}
+
+
+def _structured_task_fields(todo: dict) -> dict:
+    """Pull the structured scheduling fields off a todo, filling sane defaults.
+
+    Older/simpler todos (and the historical test payloads) only carry
+    ``priority``/``when``; for those we derive a bucket from the priority so a
+    task always lands in P0/P1/P2.
+    """
+    bucket = todo.get("bucket") or _PRIORITY_TO_BUCKET.get(
+        todo.get("priority"), "P1"
+    )
+    return {
+        "bucket": bucket,
+        "due_date": todo.get("due_date"),
+        "task_type": todo.get("task_type") or "one_off",
+        "recurrence": todo.get("recurrence"),
+        "importance": todo.get("importance") or "normal",
+        "effort_min": todo.get("effort_min") or 60,
+    }
+
+
 def _task_dedup_key(source_item_ids: list[int]) -> str:
     fingerprint = json.dumps(
         sorted(set(source_item_ids)),
@@ -457,12 +566,23 @@ def _task_dedup_key(source_item_ids: list[int]) -> str:
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
 
-def _task_to_dict(session, task: TaskRecord) -> dict:
+PROGRESS_ONCE_KEY = "once"
+
+
+def _progress_key_for(task: TaskRecord, today_iso: str) -> str:
+    """Recurring tasks track progress per day; one-off tasks keep one rolling row."""
+    return today_iso if task.task_type == "recurring" else PROGRESS_ONCE_KEY
+
+
+def _task_to_dict(session, task: TaskRecord, today_iso: Optional[str] = None) -> dict:
+    today_iso = today_iso or date.today().isoformat()
     source_item_ids = session.scalars(
         select(TaskSourceItemRecord.item_id)
         .where(TaskSourceItemRecord.task_id == task.id)
         .order_by(TaskSourceItemRecord.item_id.asc())
     ).all()
+    key = _progress_key_for(task, today_iso)
+    progress = session.get(TaskProgressRecord, (task.id, key))
     return {
         "id": task.id,
         "text": task.text,
@@ -472,7 +592,55 @@ def _task_to_dict(session, task: TaskRecord) -> dict:
         "source_item_ids": list(source_item_ids),
         "created_at": task.created_at,
         "updated_at": task.updated_at,
+        "bucket": task.bucket,
+        "due_date": task.due_date,
+        "task_type": task.task_type,
+        "recurrence": task.recurrence,
+        "importance": task.importance,
+        "effort_min": task.effort_min,
+        "progress_pct": progress.pct if progress else 0,
+        "progress_note": progress.note if progress else None,
+        "progress_date": progress.progress_date if progress else None,
     }
+
+
+def get_task_from_db(task_id: int, today_iso: Optional[str] = None) -> Optional[dict]:
+    with SessionLocal() as session:
+        task = session.get(TaskRecord, task_id)
+        if task is None:
+            return None
+        return _task_to_dict(session, task, today_iso)
+
+
+def set_task_progress(
+    task_id: int,
+    progress_date: str,
+    pct: int,
+    note: Optional[str],
+) -> Optional[dict]:
+    now = datetime.now(timezone.utc).isoformat()
+    with SessionLocal() as session:
+        task = session.get(TaskRecord, task_id)
+        if task is None:
+            return None
+        row = session.get(TaskProgressRecord, (task_id, progress_date))
+        if row is None:
+            row = TaskProgressRecord(
+                task_id=task_id,
+                progress_date=progress_date,
+            )
+            session.add(row)
+        row.pct = pct
+        row.note = note
+        row.updated_at = now
+        session.commit()
+        # Reflect the row just written (today for recurring, sentinel for one-off).
+        today_iso = (
+            progress_date
+            if task.task_type == "recurring"
+            else date.today().isoformat()
+        )
+        return _task_to_dict(session, task, today_iso)
 
 
 def list_tasks_from_db(status_filter: str = TASK_OPEN) -> list[dict]:
@@ -485,6 +653,57 @@ def list_tasks_from_db(status_filter: str = TASK_OPEN) -> list[dict]:
             statement = statement.where(TaskRecord.status == status_filter)
         tasks = session.scalars(statement).all()
         return [_task_to_dict(session, task) for task in tasks]
+
+
+_EDITABLE_TASK_FIELDS = {
+    "text",
+    "bucket",
+    "due_date",
+    "task_type",
+    "recurrence",
+    "importance",
+    "effort_min",
+}
+
+
+def update_task_in_db(task_id: int, fields: dict) -> Optional[dict]:
+    """Apply user edits to a task. Only known editable fields are written."""
+    updates = {
+        key: value
+        for key, value in fields.items()
+        if key in _EDITABLE_TASK_FIELDS
+    }
+    with SessionLocal() as session:
+        task = session.get(TaskRecord, task_id)
+        if task is None:
+            return None
+        for key, value in updates.items():
+            setattr(task, key, value)
+        task.updated_at = datetime.now(timezone.utc).isoformat()
+        session.commit()
+        return _task_to_dict(session, task)
+
+
+def delete_task_from_db(task_id: int) -> bool:
+    with SessionLocal() as session:
+        task = session.get(TaskRecord, task_id)
+        if task is None:
+            return False
+        # Remove source links and progress explicitly (SQLite FK cascade is
+        # not relied on).
+        session.execute(
+            delete(TaskSourceItemRecord).where(
+                TaskSourceItemRecord.task_id == task_id
+            )
+        )
+        session.execute(
+            delete(TaskProgressRecord).where(
+                TaskProgressRecord.task_id == task_id
+            )
+        )
+        session.delete(task)
+        session.commit()
+        return True
 
 
 def set_task_status(task_id: int, task_status: str) -> Optional[dict]:

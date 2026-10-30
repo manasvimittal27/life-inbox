@@ -1,5 +1,7 @@
 let isSavingNote = false;
 let isAnalyzingInbox = false;
+let lastTasks = [];
+let editingTaskId = null;
 const pendingNoteActions = new Set();
 const pendingTaskActions = new Set();
 const itemFilterFields = {
@@ -130,6 +132,10 @@ function changeTaskStatusFilter() {
   loadTasks();
 }
 
+function changeTaskView() {
+  renderTaskView();
+}
+
 async function fetchJson(url, options, friendlyError) {
   let response;
   try {
@@ -213,6 +219,44 @@ function actionButton(label, className, onClick) {
   return button;
 }
 
+async function uploadFile() {
+  const input = document.getElementById('fileInput');
+  const file = input.files && input.files[0];
+  if (!file) {
+    setStatus('noteStatus', 'Choose an image or PDF first.', true);
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  setButtonBusy('uploadButton', true, 'Reading…', 'Read file & add');
+  setStatus('noteStatus', `Reading ${file.name}…`);
+  try {
+    const items = await fetchJson(
+      '/api/items/upload',
+      {method: 'POST', body: formData},
+      'Unable to read the file.'
+    );
+    input.value = '';
+    const count = Array.isArray(items) ? items.length : 1;
+    setStatus(
+      'noteStatus',
+      `Added ${count} item${count === 1 ? '' : 's'} from ${file.name}. ` +
+      'Click “Analyze Entire Inbox with AI” to organize them.'
+    );
+    await loadNotes();
+  } catch {
+    setStatus(
+      'noteStatus',
+      'We could not read that file. Please try another image or PDF.',
+      true
+    );
+  } finally {
+    setButtonBusy('uploadButton', false, 'Reading…', 'Read file & add');
+  }
+}
+
 function renderNote(note) {
   const root = document.createElement('div');
   root.className = 'note';
@@ -224,7 +268,10 @@ function renderNote(note) {
 
   const time = document.createElement('div');
   time.className = 'time';
-  time.textContent = `#${note.id} · ${note.created_at}`;
+  const source = note.original_filename
+    ? ` · 📎 ${note.original_filename}`
+    : '';
+  time.textContent = `#${note.id} · ${note.created_at}${source}`;
 
   const actions = document.createElement('div');
   actions.className = 'note-actions';
@@ -340,6 +387,49 @@ async function deleteExistingNote(note, root, editButton, deleteButton) {
   }
 }
 
+function formatDueDate(iso) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  if (!match) return iso || '';
+  const d = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return d.toLocaleDateString(undefined, {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short'
+  });
+}
+
+function scheduleLabel(item) {
+  if (item.task_type === 'recurring' || item.recurrence) {
+    return `🔁 ${item.recurrence || 'recurring'}`;
+  }
+  if (item.due_date) return formatDueDate(item.due_date);
+  if (item.when) return item.when;
+  if (item.timing_text) return item.timing_text;
+  return '';
+}
+
+function bucketPillHtml(item) {
+  if (!item.bucket) {
+    return `<span class="pill">${esc(item.priority || '')}</span>`;
+  }
+  const star = item.importance === 'high' ? ' ★' : '';
+  return `<span class="pill bucket-${esc(item.bucket)}">${esc(item.bucket)}${star}</span>`;
+}
+
+function bucketPillNode(item) {
+  const span = document.createElement('span');
+  if (!item.bucket) {
+    span.className = 'pill';
+    span.textContent = item.priority || '';
+    return span;
+  }
+  span.className = `pill bucket-${item.bucket}`;
+  span.textContent = item.importance === 'high'
+    ? `${item.bucket} ★`
+    : item.bucket;
+  return span;
+}
+
 function renderTask(task) {
   const root = document.createElement('div');
   root.className = 'task';
@@ -348,24 +438,39 @@ function renderTask(task) {
   const text = document.createElement('strong');
   text.textContent = task.text;
 
-  const priority = document.createElement('span');
-  priority.className = 'pill';
-  priority.textContent = task.priority;
+  const priority = bucketPillNode(task);
 
   const content = document.createElement('div');
   content.append(text, priority);
 
   const meta = document.createElement('div');
   meta.className = 'task-meta';
-  const timing = task.timing_text ? ` · ${task.timing_text}` : '';
+  const sched = scheduleLabel(task);
+  const schedText = sched ? ` · ${sched}` : '';
+  const effort = task.effort_min ? ` · ${task.effort_min}m` : '';
   const sources = task.source_item_ids
     .map(itemId => `#${itemId}`)
     .join(', ');
-  meta.textContent = `${task.status}${timing} · Sources: ${sources}`;
+  meta.textContent = `${task.status}${schedText}${effort} · Sources: ${sources}`;
+
+  let progress = null;
+  if (task.progress_pct) {
+    progress = document.createElement('div');
+    progress.className = 'progress';
+    progress.innerHTML =
+      `<span class="progress-bar"><span class="progress-fill" ` +
+      `style="width:${task.progress_pct}%"></span></span>` +
+      `<span class="progress-pct">${task.progress_pct}%</span>`;
+  }
 
   const actions = document.createElement('div');
   actions.className = 'task-actions';
 
+  actions.append(
+    actionButton('Edit', 'secondary', () => {
+      openTaskModal(task.id);
+    })
+  );
   if (task.status === 'open') {
     actions.append(
       actionButton('Complete', '', () => {
@@ -382,8 +487,17 @@ function renderTask(task) {
       })
     );
   }
+  actions.append(
+    actionButton('Delete', 'danger', () => {
+      deleteTask(task.id);
+    })
+  );
 
-  root.append(content, meta, actions);
+  if (progress) {
+    root.append(content, meta, progress, actions);
+  } else {
+    root.append(content, meta, actions);
+  }
   return root;
 }
 
@@ -432,17 +546,9 @@ async function loadTasks() {
       undefined,
       'Unable to load tasks.'
     );
-    const root = document.getElementById('tasks');
-    root.innerHTML = '';
-
-    if (!tasks.length) {
-      root.innerHTML = '<div class="panel muted">No tasks in this view.</div>';
-      return true;
-    }
-
-    for (const task of tasks) {
-      root.appendChild(renderTask(task));
-    }
+    lastTasks = tasks;
+    renderTaskView();
+    renderTimePie();
     return true;
   } catch {
     setStatus(
@@ -451,6 +557,445 @@ async function loadTasks() {
       true
     );
     return false;
+  }
+}
+
+function renderTaskView() {
+  const mode = document.getElementById('taskViewMode').value;
+  const weekRoot = document.getElementById('weekView');
+  const listRoot = document.getElementById('tasks');
+  if (mode === 'week') {
+    listRoot.style.display = 'none';
+    weekRoot.style.display = '';
+    renderWeek(lastTasks);
+  } else {
+    weekRoot.style.display = 'none';
+    weekRoot.innerHTML = '';
+    listRoot.style.display = '';
+    renderList(lastTasks);
+  }
+}
+
+function renderList(tasks) {
+  const root = document.getElementById('tasks');
+  root.innerHTML = '';
+  if (!tasks.length) {
+    root.innerHTML = '<div class="panel muted">No tasks in this view.</div>';
+    return;
+  }
+  for (const task of tasks) {
+    root.appendChild(renderTask(task));
+  }
+}
+
+// --- Week view ---------------------------------------------------------------
+
+const BUCKET_ORDER = {P0: 0, P1: 1, P2: 2};
+
+function startOfWeek(d) {
+  const day = d.getDay();            // 0 Sun .. 6 Sat
+  const diff = day === 0 ? -6 : 1 - day;  // back to Monday
+  const monday = new Date(d);
+  monday.setDate(d.getDate() + diff);
+  monday.setHours(0, 0, 0, 0);
+  return monday;
+}
+
+function localIso(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function compareTasks(a, b) {
+  const ba = BUCKET_ORDER[a.bucket] ?? 3;
+  const bb = BUCKET_ORDER[b.bucket] ?? 3;
+  if (ba !== bb) return ba - bb;
+  const ia = a.importance === 'high' ? 0 : 1;
+  const ib = b.importance === 'high' ? 0 : 1;
+  if (ia !== ib) return ia - ib;
+  return a.id - b.id;
+}
+
+function weekTaskHtml(task, showDate) {
+  let sched = '';
+  if (showDate) {
+    sched = scheduleLabel(task);
+  } else if (task.task_type === 'recurring') {
+    sched = `🔁 ${task.recurrence || 'recurring'}`;
+  }
+  const schedText = sched ? ` · ${esc(sched)}` : '';
+  const effort = task.effort_min ? ` · ${task.effort_min}m` : '';
+  const doneClass = task.status === 'completed' ? ' week-task-done' : '';
+  const progress = task.progress_pct ? progressBarHtml(task.progress_pct) : '';
+  const overdue = task._overdue
+    ? ` <span class="overdue">overdue</span>`
+    : '';
+  return `<div class="week-task${doneClass}">${bucketPillHtml(task)}` +
+    `<span class="week-task-text">${esc(task.text)}</span>${overdue}` +
+    `<span class="week-task-meta">${schedText}${effort}</span>` +
+    taskHoverActionsHtml(task.id) +
+    progress +
+    `</div>`;
+}
+
+function taskHoverActionsHtml(taskId) {
+  return `<span class="task-hover-actions">` +
+    `<button type="button" title="Edit" aria-label="Edit task" onclick="openTaskModal(${taskId})">✎</button>` +
+    `<button type="button" title="Complete" aria-label="Complete task" onclick="completeTask(${taskId})">✓</button>` +
+    `<button type="button" title="Delete" aria-label="Delete task" onclick="deleteTask(${taskId})">🗑</button>` +
+    `</span>`;
+}
+
+function renderWeek(tasks) {
+  const root = document.getElementById('weekView');
+
+  if (!tasks.length) {
+    root.innerHTML = '<div class="panel muted">No tasks in this view.</div>';
+    return;
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayIso = localIso(today);
+  const monday = startOfWeek(today);
+  const days = [];
+  for (let i = 0; i < 7; i += 1) {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    days.push(d);
+  }
+  const weekIsos = days.map(localIso);
+
+  const recurring = tasks.filter(t => t.task_type === 'recurring');
+
+  // Assign each one-off task to a day column, carry open past-due ones onto
+  // today, and send the rest (undated / out-of-week) to the backlog.
+  const byDay = {};
+  weekIsos.forEach(iso => { byDay[iso] = []; });
+  const backlog = [];
+  for (const t of tasks) {
+    if (t.task_type === 'recurring') continue;
+    if (!t.due_date) { backlog.push(t); continue; }
+    if (t.status === 'open' && t.due_date < todayIso) {
+      byDay[todayIso].push({...t, _overdue: true});  // carry forward
+      continue;
+    }
+    if (weekIsos.includes(t.due_date)) { byDay[t.due_date].push(t); continue; }
+    backlog.push(t);
+  }
+
+  const dayCards = days.map((d, idx) => {
+    const iso = weekIsos[idx];
+    const dayTasks = [
+      ...recurring,
+      ...byDay[iso]
+    ].sort(compareTasks);
+
+    const label = d.toLocaleDateString(undefined, {weekday: 'short'});
+    const dateLabel = d.toLocaleDateString(undefined, {
+      day: 'numeric',
+      month: 'short'
+    });
+    const isToday = iso === todayIso;
+    const body = dayTasks.length
+      ? dayTasks.map(t => weekTaskHtml(t, false)).join('')
+      : '<div class="muted week-empty">—</div>';
+
+    return `
+      <div class="day-card${isToday ? ' day-today' : ''}">
+        <div class="day-head">
+          <span class="day-name">${esc(label)}</span>
+          <span class="day-date">${esc(dateLabel)}</span>
+        </div>
+        ${body}
+      </div>
+    `;
+  }).join('');
+
+  let backlogHtml = '';
+  if (backlog.length) {
+    const sorted = [...backlog].sort(compareTasks);
+    backlogHtml = `
+      <div class="panel backlog">
+        <h3>Backlog &amp; undated (${backlog.length})</h3>
+        ${sorted.map(t => {
+          const flagged = t.status === 'open'
+            && t.due_date
+            && t.due_date < todayIso;
+          return weekTaskHtml({...t, _overdue: flagged}, true);
+        }).join('')}
+      </div>
+    `;
+  }
+
+  root.innerHTML = `<div class="week-grid">${dayCards}</div>${backlogHtml}`;
+}
+
+// --- Today's time pie --------------------------------------------------------
+
+function fmtMins(mins) {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
+
+function todayOccupancy(tasks) {
+  const todayIso = localIso(new Date());
+  const totals = {P0: 0, P1: 0, P2: 0};
+  for (const t of tasks) {
+    if (t.status !== 'open') continue;  // only open tasks occupy the day
+    let countsToday = false;
+    if (t.task_type === 'recurring') {
+      countsToday = true;
+    } else if (t.due_date === todayIso) {
+      countsToday = true;
+    } else if (t.due_date && t.due_date < todayIso) {
+      countsToday = true;  // overdue, carried onto today
+    }
+    if (!countsToday) continue;
+    const bucket = t.bucket || 'P2';
+    totals[bucket] = (totals[bucket] || 0) + (t.effort_min || 0);
+  }
+  return totals;
+}
+
+function buildDonut(slices, ringTotal) {
+  const size = 150;
+  const stroke = 26;
+  const r = (size - stroke) / 2;
+  const cx = size / 2;
+  const cy = size / 2;
+  const circ = 2 * Math.PI * r;
+  let acc = 0;
+  const segs = [];
+  for (const s of slices) {
+    if (s.value <= 0) continue;
+    const len = (s.value / ringTotal) * circ;
+    segs.push(
+      `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" ` +
+      `stroke="${s.color}" stroke-width="${stroke}" ` +
+      `stroke-dasharray="${len.toFixed(2)} ${(circ - len).toFixed(2)}" ` +
+      `stroke-dashoffset="${(-acc).toFixed(2)}"></circle>`
+    );
+    acc += len;
+  }
+  return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" class="donut" aria-hidden="true">` +
+    `<g transform="rotate(-90 ${cx} ${cy})">` +
+    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#eef2f7" stroke-width="${stroke}"></circle>` +
+    segs.join('') +
+    `</g></svg>`;
+}
+
+function renderTimePie() {
+  const el = document.getElementById('timePie');
+  if (!el) return;
+  const budgetH = parseFloat(document.getElementById('dayBudget').value) || 16;
+  try {
+    localStorage.setItem('dayBudgetH', String(budgetH));
+  } catch (e) { /* ignore */ }
+
+  const budget = Math.round(budgetH * 60);
+  const totals = todayOccupancy(lastTasks);
+  const occupied = totals.P0 + totals.P1 + totals.P2;
+
+  if (occupied === 0) {
+    el.innerHTML = '<p class="muted">No time committed today. Add effort ' +
+      'estimates to today’s tasks to see your day fill up.</p>';
+    return;
+  }
+
+  const free = Math.max(0, budget - occupied);
+  const over = Math.max(0, occupied - budget);
+  const ring = Math.max(budget, occupied) || 1;
+  const slices = [
+    {label: 'P0 urgent', value: totals.P0, color: '#b42318'},
+    {label: 'P1 deep work', value: totals.P1, color: '#9a6700'},
+    {label: 'P2 operational', value: totals.P2, color: '#0b5566'},
+    {label: 'Free', value: free, color: '#86c08f'}
+  ];
+  const legend = slices
+    .filter(s => s.value > 0)
+    .map(s =>
+      `<li><span class="swatch" style="background:${s.color}"></span>` +
+      `${s.label} — ${fmtMins(s.value)}</li>`
+    )
+    .join('');
+  const pct = budget ? Math.round((occupied / budget) * 100) : 0;
+  const overMsg = over > 0
+    ? `<p class="over">Overbooked by ${fmtMins(over)}</p>`
+    : '';
+
+  el.innerHTML = `
+    <div class="time-layout">
+      ${buildDonut(slices, ring)}
+      <div class="time-info">
+        <p><strong>${fmtMins(occupied)}</strong> committed of ${fmtMins(budget)} (${pct}%)</p>
+        <ul class="time-legend">${legend}</ul>
+        ${overMsg}
+      </div>
+    </div>
+  `;
+}
+
+// --- Task actions & edit modal ----------------------------------------------
+
+async function completeTask(taskId) {
+  if (pendingTaskActions.has(taskId)) return;
+  pendingTaskActions.add(taskId);
+  setStatus('taskStatus', 'Updating task…');
+  try {
+    await fetchJson(
+      `/api/tasks/${taskId}/complete`,
+      {method: 'POST'},
+      'Unable to complete task.'
+    );
+    setStatus('taskStatus', 'Task completed.');
+    await loadTasks();
+  } catch {
+    setStatus('taskStatus', 'We could not complete this task.', true);
+  } finally {
+    pendingTaskActions.delete(taskId);
+  }
+}
+
+async function deleteTask(taskId) {
+  if (!window.confirm('Delete this task? This cannot be undone.')) return;
+  if (pendingTaskActions.has(taskId)) return;
+  pendingTaskActions.add(taskId);
+  setStatus('taskStatus', 'Deleting task…');
+  try {
+    await fetchJson(
+      `/api/tasks/${taskId}`,
+      {method: 'DELETE'},
+      'Unable to delete task.'
+    );
+    setStatus('taskStatus', 'Task deleted.');
+    await loadTasks();
+  } catch {
+    setStatus('taskStatus', 'We could not delete this task.', true);
+  } finally {
+    pendingTaskActions.delete(taskId);
+  }
+}
+
+function onEditTypeChange() {
+  const type = document.getElementById('editType').value;
+  const recurring = type === 'recurring';
+  document.getElementById('editDueWrap').style.display = recurring ? 'none' : '';
+  document.getElementById('editRecurrenceWrap').style.display =
+    recurring ? '' : 'none';
+}
+
+function openTaskModal(taskId) {
+  const task = lastTasks.find(t => t.id === taskId);
+  if (!task) return;
+  editingTaskId = taskId;
+  document.getElementById('editText').value = task.text || '';
+  document.getElementById('editBucket').value = task.bucket || 'P1';
+  document.getElementById('editType').value = task.task_type || 'one_off';
+  document.getElementById('editDue').value = task.due_date || '';
+  document.getElementById('editRecurrence').value = task.recurrence || 'daily';
+  document.getElementById('editImportance').checked = task.importance === 'high';
+  document.getElementById('editEffort').value =
+    task.effort_min != null ? task.effort_min : '';
+  document.getElementById('editProgressNote').value = task.progress_note || '';
+  document.getElementById('editProgressPct').value =
+    task.progress_pct != null ? task.progress_pct : '';
+  onEditTypeChange();
+  setStatus('editStatus', '');
+  document.getElementById('taskModalBackdrop').hidden = false;
+}
+
+async function logProgress() {
+  if (editingTaskId == null) return;
+  const note = document.getElementById('editProgressNote').value.trim();
+  const pctRaw = document.getElementById('editProgressPct').value;
+  const payload = {};
+  if (note) payload.note = note;
+  if (pctRaw !== '') payload.pct = Number(pctRaw);
+  if (payload.pct == null && !payload.note) {
+    setStatus('editStatus', 'Add a progress note or a %.', true);
+    return;
+  }
+  setStatus('editStatus', 'Logging progress…');
+  try {
+    const updated = await fetchJson(
+      `/api/tasks/${editingTaskId}/progress`,
+      {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      },
+      'Unable to log progress.'
+    );
+    document.getElementById('editProgressPct').value = updated.progress_pct;
+    setStatus('editStatus', `Logged: ${updated.progress_pct}% complete today.`);
+    await loadTasks();
+  } catch {
+    setStatus('editStatus', 'Could not log progress. Please try again.', true);
+  }
+}
+
+function progressBarHtml(pct) {
+  return `<span class="progress">` +
+    `<span class="progress-bar"><span class="progress-fill" style="width:${pct}%"></span></span>` +
+    `<span class="progress-pct">${pct}%</span></span>`;
+}
+
+function closeTaskModal() {
+  document.getElementById('taskModalBackdrop').hidden = true;
+  editingTaskId = null;
+}
+
+function onModalBackdropClick(event) {
+  if (event.target.id === 'taskModalBackdrop') closeTaskModal();
+}
+
+async function saveTaskEdit() {
+  if (editingTaskId == null) return;
+  const text = document.getElementById('editText').value.trim();
+  if (!text) {
+    setStatus('editStatus', 'Task text is required.', true);
+    return;
+  }
+  const type = document.getElementById('editType').value;
+  const payload = {
+    text,
+    bucket: document.getElementById('editBucket').value,
+    task_type: type,
+    importance: document.getElementById('editImportance').checked
+      ? 'high'
+      : 'normal'
+  };
+  if (type === 'recurring') {
+    payload.recurrence = document.getElementById('editRecurrence').value;
+    payload.due_date = null;
+  } else {
+    payload.recurrence = null;
+    payload.due_date = document.getElementById('editDue').value || null;
+  }
+  const effortRaw = document.getElementById('editEffort').value;
+  if (effortRaw !== '') payload.effort_min = Number(effortRaw);
+
+  try {
+    await fetchJson(
+      `/api/tasks/${editingTaskId}`,
+      {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      },
+      'Unable to save task.'
+    );
+    closeTaskModal();
+    setStatus('taskStatus', 'Task updated.');
+    await loadTasks();
+  } catch {
+    setStatus('editStatus', 'Could not save changes. Please try again.', true);
   }
 }
 
@@ -471,9 +1016,12 @@ function renderAnalysis(data) {
     </div>
   `).join('');
 
-  const todoHtml = (data.todos || []).map(t =>
-    `<li><strong>${esc(t.task)}</strong> <span class="pill">${esc(t.priority)}</span>${t.when ? ` · ${esc(t.when)}` : ''}</li>`
-  ).join('');
+  const todoHtml = (data.todos || []).map(t => {
+    const sched = scheduleLabel(t);
+    const schedText = sched ? ` · ${esc(sched)}` : '';
+    const effort = t.effort_min ? ` · ${t.effort_min}m` : '';
+    return `<li><strong>${esc(t.task)}</strong> ${bucketPillHtml(t)}${schedText}${effort}</li>`;
+  }).join('');
 
   const pv = data.priority_view || {High: [], Medium: [], Low: []};
   const priorityHtml = ['High', 'Medium', 'Low'].map(level => `
@@ -591,7 +1139,7 @@ async function loadNotes(
       return true;
     }
 
-    for (const note of notes.filter(item => item.item_type === 'text')) {
+    for (const note of notes.filter(item => item.raw_text)) {
       root.appendChild(renderNote(note));
     }
     setStatus(
@@ -615,7 +1163,15 @@ async function loadNotes(
   }
 }
 
+function restoreDayBudget() {
+  try {
+    const saved = localStorage.getItem('dayBudgetH');
+    if (saved) document.getElementById('dayBudget').value = saved;
+  } catch (e) { /* ignore */ }
+}
+
 syncControlsFromUrl();
+restoreDayBudget();
 loadNotes();
 loadLatestAnalysis();
 loadTasks();

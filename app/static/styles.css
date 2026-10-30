@@ -1,12 +1,23 @@
-body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 40px; background: #f6f8fa; color: #111; }
+:root {
+  --bg: #f6f8fa;
+  --text: #111;
+  --muted: #666;
+  --card-border: #e5e7eb;
+  --primary: #0b7285;
+  --danger: #b42318;
+  --p0-bg: #fde0e0; --p0-fg: #b42318;
+  --p1-bg: #fdf0d5; --p1-fg: #9a6700;
+  --p2-bg: #e6f0f5; --p2-fg: #0b5566;
+}
+body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 40px; background: var(--bg); color: var(--text); }
 .wrap { max-width: 920px; margin: 0 auto; }
 h1 { margin-bottom: 6px; }
 h3 { margin-bottom: 8px; }
 .sub { color: #555; margin-top: 0; }
 textarea { width: 100%; min-height: 100px; font-size: 16px; padding: 12px; border-radius: 10px; border: 1px solid #ccc; box-sizing: border-box; }
-button { margin-top: 12px; margin-right: 8px; padding: 10px 14px; border: 0; border-radius: 8px; cursor: pointer; background: #0b7285; color: white; font-weight: 650; }
+button { margin-top: 12px; margin-right: 8px; padding: 10px 14px; border: 0; border-radius: 8px; cursor: pointer; background: var(--primary); color: white; font-weight: 650; }
 button.secondary { background: #495057; }
-button.danger { background: #b42318; }
+button.danger { background: var(--danger); }
 button:disabled { cursor: not-allowed; opacity: 0.65; }
 .panel { background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin: 12px 0; }
 .note { background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px; margin: 12px 0; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
@@ -26,8 +37,80 @@ button:disabled { cursor: not-allowed; opacity: 0.65; }
 .task-actions button { margin: 0; padding: 7px 11px; }
 .note-edit-input { min-height: 72px; }
 .time { color: #777; font-size: 12px; margin-top: 6px; }
-.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eef2f7; margin-left: 6px; font-size: 12px; }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eef2f7; margin-left: 6px; font-size: 12px; font-weight: 600; }
+.pill.bucket-P0 { background: var(--p0-bg); color: var(--p0-fg); }
+.pill.bucket-P1 { background: var(--p1-bg); color: var(--p1-fg); }
+.pill.bucket-P2 { background: var(--p2-bg); color: var(--p2-fg); }
 ul { padding-left: 22px; }
+.week-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
+.day-card { background: white; border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px; min-height: 90px; }
+.day-today { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.day-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.day-name { font-weight: 700; }
+.day-date { color: #777; font-size: 12px; }
+.week-task { font-size: 13px; padding: 5px 0; border-top: 1px solid #f0f2f4; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px; }
+.week-task:first-of-type { border-top: 0; }
+.week-task .pill { margin-left: 0; }
+.week-task-text { margin-left: 4px; }
+.week-task-meta { color: #777; font-size: 12px; }
+.week-task-done .week-task-text { text-decoration: line-through; color: #999; }
+.week-empty { font-size: 13px; }
+.backlog h3 { margin-top: 0; }
+.overdue { color: #b42318; font-size: 11px; font-weight: 600; margin-left: 4px; }
+@media (max-width: 760px) {
+  .week-grid { grid-template-columns: 1fr; }
+}
 .muted { color: #666; }
 .status { min-height: 20px; margin: 8px 0 0; }
 .status.error { color: #b42318; }
+
+/* Hover actions on tasks */
+.task-hover-actions { display: none; margin-left: auto; gap: 2px; }
+.week-task:hover .task-hover-actions,
+.week-task:focus-within .task-hover-actions { display: inline-flex; }
+.task-hover-actions button { margin: 0; padding: 1px 6px; font-size: 12px; background: #eef2f7; color: #333; border-radius: 6px; font-weight: 600; }
+.task-hover-actions button:hover { background: #dde6ee; }
+
+/* Edit modal */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 100; }
+.modal-backdrop[hidden] { display: none; }
+.modal { background: white; border-radius: 12px; padding: 20px; width: 100%; max-width: 420px; max-height: 90vh; overflow: auto; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
+.modal h3 { margin-top: 0; }
+.modal-field { display: grid; gap: 5px; margin-bottom: 12px; color: #333; font-size: 14px; }
+.modal-field input, .modal-field select, .modal-field textarea { padding: 8px 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 14px; box-sizing: border-box; }
+.modal-field textarea { min-height: 60px; }
+.modal-check { grid-auto-flow: column; justify-content: start; align-items: center; gap: 8px; }
+.modal-actions { display: flex; gap: 8px; margin-top: 4px; }
+.modal-actions button { margin-top: 0; }
+.modal-progress { border-top: 1px solid #eee; margin-top: 14px; padding-top: 12px; }
+.modal-progress h4 { margin: 0 0 10px; }
+.small { font-size: 12px; }
+
+/* Progress bars */
+.progress { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; }
+.week-task .progress { flex-basis: 100%; }
+.progress-bar { display: inline-block; width: 90px; height: 6px; background: #e5e7eb; border-radius: 999px; overflow: hidden; }
+.progress-fill { display: block; height: 100%; background: var(--primary); }
+.progress-pct { font-size: 12px; color: #555; }
+
+/* File upload */
+.upload-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.upload-row input[type="file"] { font-size: 13px; }
+
+/* Today's time pie */
+.time-panel .time-budget { display: inline-grid; gap: 5px; color: #555; font-size: 13px; margin-bottom: 12px; }
+.time-panel .time-budget input { width: 90px; padding: 7px 10px; border: 1px solid #ccc; border-radius: 8px; }
+.time-layout { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+.donut { flex: none; }
+.time-info { font-size: 14px; }
+.time-legend { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 4px; }
+.time-legend li { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; }
+.over { color: var(--danger); font-weight: 600; margin: 8px 0 0; }
+
+/* Mobile */
+@media (max-width: 600px) {
+  body { margin: 16px; }
+  .search-toolbar input, .search-toolbar select { min-width: 0; width: 100%; }
+  .search-toolbar label { width: 100%; }
+}
