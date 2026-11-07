@@ -1,8 +1,17 @@
 import json
 import logging
 import os
+import re
 from datetime import date, timedelta
 from typing import Optional
+
+
+URL_RE = re.compile(r"https?://[^\s]+")
+
+
+def extract_url(text: str) -> Optional[str]:
+    match = URL_RE.search(text or "")
+    return match.group(0).rstrip(").,") if match else None
 
 from app.schemas import AnalysisResult
 
@@ -194,6 +203,7 @@ def fallback_analyze(notes: list[dict], today: Optional[date] = None) -> dict:
                 "recurrence": schedule["recurrence"],
                 "importance": importance_for_text(text),
                 "effort_min": effort_for_text(text, schedule),
+                "link": extract_url(text),
             })
 
     return {
@@ -363,7 +373,8 @@ Return ONLY valid JSON in exactly this shape:
       "task_type": "one_off",
       "recurrence": "daily / weekly, or null",
       "importance": "high or normal",
-      "effort_min": 60
+      "effort_min": 60,
+      "link": "meeting/call URL if the note has one, else null"
     }}
   ],
   "priority_view": {{
@@ -405,6 +416,8 @@ Rules:
     "must", "critical"); this boosts ranking WITHIN a bucket and does NOT promote to P0.
 14. "effort_min" is an estimated duration in minutes; default learning/deep-work
     sessions to 60, quick operational tasks to ~15-30.
+15a. "link": if the note contains a meeting or call URL (Google Meet, Zoom,
+    Teams, a lecture/webinar link), copy that full URL into "link". Otherwise null.
 15. Keep titles and ToDos short and concrete. No motivational language, commentary, or prose outside the JSON.
 16. priority_view should include every note once, grouped by priority.
 

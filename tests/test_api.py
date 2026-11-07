@@ -42,7 +42,7 @@ def test_home_page_loads(client):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "<title>Life Inbox</title>" in response.text
-    assert "Analyze Entire Inbox with AI" in response.text
+    assert 'id="dayView"' in response.text
 
 
 @pytest.mark.parametrize(
@@ -496,6 +496,7 @@ def test_analyze_uses_deterministic_fallback_without_openai_key(client):
                 "recurrence": None,
                 "importance": "normal",
                 "effort_min": 30,
+                "link": None,
             }
         ],
         "priority_view": {
