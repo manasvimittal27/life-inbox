@@ -4,12 +4,18 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Life Inbox</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,550&family=Hanken+Grotesk:wght@400;500;600;700&display=swap" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
-<body>
+<body class="empty-state">
   <div class="wrap">
     <header class="app-header">
-      <h1>Life Inbox</h1>
+      <div class="title-row">
+        <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <h1>Life Inbox</h1>
+      </div>
       <p class="sub">Enter your thoughts — I’ll handle everything else.</p>
     </header>
 
@@ -32,6 +38,10 @@
           <button class="day-arrow" type="button" onclick="changeDay(-1)" aria-label="Previous day">&lsaquo;</button>
           <h2 id="dayLabel">Today</h2>
           <button class="day-arrow" type="button" onclick="changeDay(1)" aria-label="Next day">&rsaquo;</button>
+        </div>
+        <div id="thinking" class="thinking" hidden>
+          <span class="dots animate" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>Organizing into P0 / P1 / P2…</span>
         </div>
         <p id="taskStatus" class="status muted" role="status" aria-live="polite"></p>
         <div id="dayView"></div>

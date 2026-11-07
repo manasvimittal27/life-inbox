@@ -251,8 +251,9 @@ async function addNote() {
   setButtonBusy('addNoteButton', true, 'Saving…', 'Add & organize');
   setStatus('noteStatus', 'Saving your note…');
 
+  let savedItem = null;
   try {
-    await fetchJson(
+    savedItem = await fetchJson(
       '/api/items',
       {
         method: 'POST',
@@ -269,6 +270,7 @@ async function addNote() {
     await loadNotes(
       'Your note was saved, but the list could not refresh. Reload to try again.'
     );
+    return savedItem;
   } catch {
     setStatus(
       'noteStatus',
@@ -623,6 +625,7 @@ async function loadTasks() {
       'Unable to load tasks.'
     );
     lastTasks = tasks;
+    updateEmptyState();
     renderDay();
     renderTimePie();
     renderWeekSummary();
@@ -638,6 +641,11 @@ async function loadTasks() {
 }
 
 // --- Day view ----------------------------------------------------------------
+
+// First-run: when there's nothing yet, show only the centered capture bar.
+function updateEmptyState() {
+  document.body.classList.toggle('empty-state', lastTasks.length === 0);
+}
 
 const BUCKET_ORDER = {P0: 0, P1: 1, P2: 2};
 const BUCKET_LABELS = {
@@ -688,6 +696,9 @@ function dayTasksFor(dateIso) {
       out.push(t);
     } else if (t.due_date === dateIso) {
       out.push(t);
+    } else if (dateIso === todayIso && t.status === 'open' && !t.due_date) {
+      // Undated tasks surface on today so new thoughts show up immediately.
+      out.push({...t, _anytime: true});
     } else if (
       dateIso === todayIso
       && t.status === 'open'
@@ -762,11 +773,12 @@ function renderDayTaskHtml(task) {
   const effort = task.effort_min ? `<span class="task-effort">${task.effort_min}m</span>` : '';
   const star = task.importance === 'high' ? ' <span class="star">★</span>' : '';
   const overdue = task._overdue ? ' <span class="overdue">overdue</span>' : '';
+  const anytime = task._anytime ? ' <span class="anytime">anytime</span>' : '';
   const join = meetingJoinHtml(task);
   const progress = task.progress_pct ? progressBarHtml(task.progress_pct) : '';
   return `<div class="task-row${doneClass}" data-task-id="${task.id}">
     <div class="task-row-main">
-      <span class="task-row-text">${linkifyText(task.text)}${star}${overdue}</span>
+      <span class="task-row-text">${linkifyText(task.text)}${star}${overdue}${anytime}</span>
       ${join}
     </div>
     <div class="task-row-meta">${schedText}${effort}${progress}</div>
@@ -890,7 +902,7 @@ function buildDonut(slices, ringTotal) {
   }
   return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" class="donut" aria-hidden="true">` +
     `<g transform="rotate(-90 ${cx} ${cy})">` +
-    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#eef2f7" stroke-width="${stroke}"></circle>` +
+    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#efece5" stroke-width="${stroke}"></circle>` +
     segs.join('') +
     `</g></svg>`;
 }
@@ -916,10 +928,10 @@ function renderTimePie() {
   const over = Math.max(0, occupied - budget);
   const ring = Math.max(budget, occupied) || 1;
   const slices = [
-    {label: 'P0 urgent', value: totals.P0, color: '#b42318'},
-    {label: 'P1 deep work', value: totals.P1, color: '#9a6700'},
-    {label: 'P2 operational', value: totals.P2, color: '#0b5566'},
-    {label: 'Free', value: free, color: '#86c08f'}
+    {label: 'P0 urgent', value: totals.P0, color: '#a8432f'},
+    {label: 'P1 deep work', value: totals.P1, color: '#c08a3e'},
+    {label: 'P2 operational', value: totals.P2, color: '#3f6b78'},
+    {label: 'Free', value: free, color: '#b9cdb0'}
   ];
   const legend = slices
     .filter(s => s.value > 0)
@@ -1106,11 +1118,11 @@ async function saveTaskEdit() {
 async function analyzeInbox() {
   if (isAnalyzingInbox) return;
   isAnalyzingInbox = true;
-  setStatus('taskStatus', 'Organizing into P0 / P1 / P2…');
+  const thinking = document.getElementById('thinking');
+  if (thinking) thinking.hidden = false;
   try {
     await fetchJson('/api/analyze', {method: 'POST'}, 'Unable to analyze inbox.');
     await loadTasks();
-    setStatus('taskStatus', '');
   } catch {
     setStatus(
       'noteStatus',
@@ -1119,20 +1131,66 @@ async function analyzeInbox() {
     );
   } finally {
     isAnalyzingInbox = false;
+    if (thinking) thinking.hidden = true;
   }
 }
 
-// One-tap flow: save the thought, then organize it into the day.
+// One-tap flow: save the thought, organize it, and show where it landed.
 async function captureAndOrganize() {
   const text = document.getElementById('noteText').value.trim();
   if (!text) {
     setStatus('noteStatus', 'Enter a thought first — or press 🎤 Speak.', true);
     return;
   }
-  await addNote();  // saves + clears the box (manages its own button state)
-  if (document.getElementById('noteText').value.trim()) return;  // save failed
-  await analyzeInbox();
-  setStatus('noteStatus', 'Done — sorted into your day.');
+  const item = await addNote();  // saves + clears the box, returns the item
+  if (!item || document.getElementById('noteText').value.trim()) return;
+
+  // Fast path: analyze ONLY this new note (not the whole inbox).
+  const thinking = document.getElementById('thinking');
+  if (thinking) thinking.hidden = false;
+  let created = [];
+  try {
+    created = await fetchJson(
+      `/api/items/${item.id}/organize`,
+      {method: 'POST'},
+      'Unable to organize this note.'
+    ) || [];
+    await loadTasks();
+  } catch {
+    setStatus('noteStatus', 'Saved, but could not organize it. Try again.', true);
+    return;
+  } finally {
+    if (thinking) thinking.hidden = true;
+  }
+  if (!created.length) {
+    setStatus('noteStatus', 'Saved to your inbox.');
+    return;
+  }
+
+  const whenOf = (t) => {
+    if (t.task_type === 'recurring') return t.recurrence || 'recurring';
+    if (t.due_date) return formatDueDate(t.due_date);
+    return 'today';
+  };
+  const summary = created
+    .map(t => `${t.text} → ${t.bucket} · ${whenOf(t)}`)
+    .join('   ·   ');
+  setStatus('noteStatus', `Sorted: ${summary}`);
+
+  // If a new task isn't on the day you're viewing, jump so you actually see it.
+  const onView = dayTasksFor(localIso(selectedDate)).some(
+    d => created.some(c => c.id === d.id)
+  );
+  if (!onView) {
+    const dated = created.find(t => t.due_date);
+    if (dated) {
+      selectedDate = new Date(`${dated.due_date}T00:00:00`);
+      selectedDate.setHours(0, 0, 0, 0);
+      updateDayLabel();
+      renderDay();
+      renderTimePie();
+    }
+  }
 }
 
 async function loadNotes(

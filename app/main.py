@@ -14,6 +14,8 @@ from app.database import (
     add_item_to_db,
     add_note_to_db,
     complete_analysis_run,
+    create_tasks_for_item,
+    get_item_from_db,
     delete_item_from_db,
     delete_note_from_db,
     delete_task_from_db,
@@ -33,6 +35,7 @@ from app.database import (
 )
 from app.organizer import (
     analyze_inbox_with_openai,
+    analyze_single_note,
     estimate_progress,
     extract_content_from_file,
     validate_analysis_result,
@@ -76,6 +79,23 @@ def create_item(payload: InboxItemCreate):
         raise HTTPException(
             status_code=500,
             detail="Unable to save item. Please try again.",
+        ) from exc
+
+
+@app.post("/api/items/{item_id}/organize", response_model=List[Task])
+def organize_item(item_id: int):
+    """Fast path: analyze just this one note and create its task(s)."""
+    item = get_item_from_db(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found.")
+    try:
+        todos = analyze_single_note(item.get("raw_text") or "")
+        return create_tasks_for_item(item_id, todos)
+    except Exception as exc:
+        logger.exception("Failed to organize item")
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to organize this note. Please try again.",
         ) from exc
 
 

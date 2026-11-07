@@ -16,8 +16,16 @@ def extract_url(text: str) -> Optional[str]:
 from app.schemas import AnalysisResult
 
 
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 logger = logging.getLogger(__name__)
+
+
+def _model_kwargs() -> dict:
+    """Reasoning effort only applies to GPT-5 reasoning models; keep it off the
+    fast non-reasoning models (gpt-4o-mini etc.)."""
+    if MODEL.startswith("gpt-5"):
+        return {"reasoning": {"effort": "minimal"}}
+    return {}
 
 
 def extract_json_object(raw: str) -> dict:
@@ -114,6 +122,9 @@ def _resolve_date(lowered: str, today: date) -> Optional[str]:
     for name, idx in WEEKDAYS.items():
         if name in lowered:
             return _next_weekday(today, idx).isoformat()
+    # A bare clock time ("9pm", "21:00") with no day means today.
+    if re.search(r"\b\d{1,2}\s*(?:am|pm)\b", lowered) or re.search(r"\b\d{1,2}:\d{2}\b", lowered):
+        return today.isoformat()
     return None
 
 
@@ -250,7 +261,11 @@ def estimate_progress(task_text: str, note: str) -> int:
             f"Progress note: {note}\n"
             "Reply with ONLY the number."
         )
-        response = client.responses.create(model=MODEL, input=prompt)
+        response = client.responses.create(
+            model=MODEL,
+            input=prompt,
+            **_model_kwargs(),
+        )
         match = re.search(r"\d{1,3}", response.output_text or "")
         if match:
             return max(0, min(100, int(match.group())))
@@ -305,8 +320,80 @@ def extract_content_from_file(data: bytes, mime: str, filename: str) -> str:
                 ],
             }
         ],
+        **_model_kwargs(),
     )
     return (response.output_text or "").strip()
+
+
+def _fallback_single_note(text: str, today: date) -> list[dict]:
+    """Deterministic single-note todos (no API key)."""
+    schedule = resolve_schedule(text, today)
+    return [{
+        "task": text.strip(),
+        "bucket": bucket_for_todo(text, schedule, today),
+        "due_date": schedule["due_date"],
+        "task_type": schedule["task_type"],
+        "recurrence": schedule["recurrence"],
+        "importance": importance_for_text(text),
+        "effort_min": effort_for_text(text, schedule),
+        "link": extract_url(text),
+    }]
+
+
+def analyze_single_note(text: str, today: Optional[date] = None) -> list[dict]:
+    """Fast path: turn ONE note into its structured to-do(s). Much faster than
+    re-analyzing the whole inbox."""
+    today = today or date.today()
+    if not os.getenv("OPENAI_API_KEY"):
+        return _fallback_single_note(text, today)
+
+    try:
+        from openai import OpenAI
+        client = OpenAI()
+        prompt = f"""
+Today is {today.strftime("%A")}, {today.isoformat()}.
+Turn this ONE personal note into its actionable to-do(s).
+
+Return ONLY a JSON array. Each element:
+{{
+  "task": "concrete action",
+  "bucket": "P0 | P1 | P2",
+  "due_date": "YYYY-MM-DD or null",
+  "task_type": "one_off | recurring",
+  "recurrence": "daily | weekly | null",
+  "importance": "high | normal",
+  "effort_min": 60,
+  "link": "meeting/call URL if present, else null"
+}}
+
+Rules:
+- Resolve ALL timing to a real date. If no date is given, use today. A bare
+  time ("9pm") or "tonight" → today. "next <weekday>"/"<weekday>" → the coming
+  one. "the Nth" → Nth of the current month. "regularly"/"daily" → recurring, daily.
+- bucket: P0 = urgent/deadline or clearly top-priority; P1 = important deep work
+  (studying, building, coding, learning); P2 = operational errands and hobbies.
+- importance "high" only if the note stresses it ("crucial", "important").
+- effort_min: learning/deep work ~60, quick errands ~15-30.
+- If the note has several distinct actions, return several elements.
+
+Note: {json.dumps(text)}
+"""
+        response = client.responses.create(
+            model=MODEL,
+            input=prompt,
+            **_model_kwargs(),
+        )
+        raw = (response.output_text or "").strip()
+        if raw.startswith("```"):
+            raw = raw.replace("```json", "").replace("```", "").strip()
+        start, end = raw.find("["), raw.rfind("]")
+        if start == -1 or end == -1:
+            return _fallback_single_note(text, today)
+        todos = json.loads(raw[start:end + 1])
+        return todos if isinstance(todos, list) and todos else _fallback_single_note(text, today)
+    except Exception:
+        logger.exception("Single-note analysis failed; using fallback")
+        return _fallback_single_note(text, today)
 
 
 def validate_analysis_result(result: dict, notes: list[dict]) -> dict:
@@ -405,7 +492,8 @@ Rules:
     set "task_type" to "recurring" and leave "due_date" null; treat "regularly"
     and "every day" as "recurrence": "daily" unless a weekly cadence is explicit.
     Otherwise "task_type" is "one_off" with a "due_date" (or null if truly no
-    timing is implied).
+    timing is implied). If a note gives only a clock time ("9pm", "21:00") or
+    "tonight" with no explicit day, treat it as today.
 12. Assign each ToDo a "bucket":
     - P0 = urgent: a hard deadline that is today or tomorrow, or explicit urgency.
     - P1 = important deep/analytical work (studying, coding, building, brainstorming,
@@ -425,7 +513,11 @@ Saved notes:
 {json.dumps(compact_notes, ensure_ascii=False)}
 """
 
-        response = client.responses.create(model=MODEL, input=prompt)
+        response = client.responses.create(
+            model=MODEL,
+            input=prompt,
+            **_model_kwargs(),
+        )
         result = extract_json_object(response.output_text)
         result["mode"] = "openai"
         return validate_analysis_result(result, notes)
