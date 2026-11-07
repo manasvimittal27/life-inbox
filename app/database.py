@@ -218,6 +218,12 @@ def add_file_item_to_db(
         return _item_to_dict(item)
 
 
+def get_item_from_db(item_id: int) -> Optional[dict]:
+    with SessionLocal() as session:
+        item = session.get(InboxItemRecord, item_id)
+        return _item_to_dict(item) if item is not None else None
+
+
 def list_items_from_db(
     search: Optional[str] = None,
     item_type: Optional[str] = None,
@@ -536,6 +542,69 @@ def get_latest_successful_analysis() -> Optional[dict]:
 
 
 _PRIORITY_TO_BUCKET = {"High": "P0", "Medium": "P1", "Low": "P2"}
+_BUCKET_TO_PRIORITY = {"P0": "High", "P1": "Medium", "P2": "Low"}
+
+
+def create_tasks_for_item(item_id: int, todos: list[dict]) -> list[dict]:
+    """Fast per-note path: create (or refresh) the task(s) for one note's todos,
+    without re-touching the rest of the inbox."""
+    now = datetime.now(timezone.utc).isoformat()
+    with SessionLocal() as session:
+        if session.get(InboxItemRecord, item_id) is None:
+            raise ValueError(f"Item {item_id} not found")
+
+        existing = session.scalars(
+            select(TaskRecord)
+            .join(TaskSourceItemRecord)
+            .where(TaskSourceItemRecord.item_id == item_id)
+            .order_by(TaskRecord.id.asc())
+        ).all()
+
+        result_ids: list[int] = []
+        for idx, todo in enumerate(todos or []):
+            structured = _structured_task_fields(todo)
+            priority = _BUCKET_TO_PRIORITY.get(structured["bucket"], "Medium")
+
+            if idx == 0 and existing:
+                # Refresh the note's primary task in place (keeps status/progress).
+                task = existing[0]
+                task.text = todo.get("task", task.text)
+                task.priority = priority
+                for key, value in structured.items():
+                    setattr(task, key, value)
+                task.updated_at = now
+                result_ids.append(task.id)
+                continue
+
+            dedup = (
+                _task_dedup_key([item_id]) if idx == 0
+                else hashlib.sha256(
+                    f"{item_id}:{idx}:{todo.get('task', '')}".encode("utf-8")
+                ).hexdigest()
+            )
+            task = TaskRecord(
+                text=todo.get("task", "").strip() or "Untitled",
+                priority=priority,
+                timing_text=None,
+                status=TASK_OPEN,
+                dedup_key=dedup,
+                created_at=now,
+                updated_at=now,
+                **structured,
+            )
+            session.add(task)
+            session.flush()
+            if idx == 0:
+                session.add(
+                    TaskSourceItemRecord(task_id=task.id, item_id=item_id)
+                )
+            result_ids.append(task.id)
+
+        session.commit()
+        return [
+            _task_to_dict(session, session.get(TaskRecord, tid))
+            for tid in result_ids
+        ]
 
 
 def _structured_task_fields(todo: dict) -> dict:
