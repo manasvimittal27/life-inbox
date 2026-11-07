@@ -8,95 +8,95 @@
 </head>
 <body>
   <div class="wrap">
-    <h1>Life Inbox</h1>
-    <p class="sub">Capture first. Organize the whole inbox with AI when you are ready.</p>
+    <header class="app-header">
+      <h1>Life Inbox</h1>
+      <p class="sub">Enter your thoughts — I’ll handle everything else.</p>
+    </header>
 
-    <textarea id="noteText" placeholder="Example: Met Rohan yesterday. He recommended Atomic Habits. Need to order it this weekend. Also ask him about that Gurgaon restaurant."></textarea>
-    <br />
-    <button id="addNoteButton" type="button" onclick="addNote()">Add Note</button>
-    <button id="analyzeButton" type="button" class="secondary" onclick="analyzeInbox()">Analyze Entire Inbox with AI</button>
-    <div class="upload-row">
-      <input type="file" id="fileInput" accept="image/*,application/pdf" />
-      <button id="uploadButton" type="button" class="secondary" onclick="uploadFile()">Read file &amp; add</button>
-      <span class="muted small">Image or PDF — a screenshot, photo, or document.</span>
-    </div>
-    <p id="noteStatus" class="status muted" role="status" aria-live="polite"></p>
-
-    <h2>AI-organized inbox</h2>
-    <p id="analysisStatus" class="status muted" role="status" aria-live="polite"></p>
-    <div id="aiOutput" class="panel">
-      <span class="muted">Save a few notes, then click “Analyze Entire Inbox with AI”.</span>
-    </div>
-
-    <h2>Today at a glance</h2>
-    <div class="panel time-panel">
-      <label class="time-budget">
-        Awake hours today
-        <input type="number" id="dayBudget" min="1" max="24" step="0.5" value="16" oninput="renderTimePie()" />
-      </label>
-      <div id="timePie"></div>
-    </div>
-
-    <h2>Tasks</h2>
-    <div class="task-toolbar">
-      <label for="taskViewMode">View</label>
-      <select id="taskViewMode" onchange="changeTaskView()">
-        <option value="week">Week</option>
-        <option value="list">List</option>
-      </select>
-      <label for="taskStatusFilter">Show</label>
-      <select id="taskStatusFilter" onchange="changeTaskStatusFilter()">
-        <option value="open">Open</option>
-        <option value="completed">Completed</option>
-        <option value="dismissed">Dismissed</option>
-      </select>
-    </div>
-    <p id="taskStatus" class="status muted" role="status" aria-live="polite"></p>
-    <div id="weekView"></div>
-    <div id="tasks"></div>
-
-    <h2>Raw saved notes</h2>
-    <form id="itemSearchForm" class="search-toolbar" onsubmit="applyItemFilters(event)">
-      <label>
-        Search
-        <input id="itemSearch" type="search" maxlength="200" placeholder="Text or title" />
-      </label>
-      <label>
-        Type
-        <select id="itemTypeFilter">
-          <option value="">All</option>
-          <option value="text">Text</option>
-        </select>
-      </label>
-      <label>
-        Category
-        <select id="categoryFilter">
-          <option value="">All</option>
-        </select>
-      </label>
-      <label>
-        Priority
-        <select id="priorityFilter">
-          <option value="">All</option>
-          <option value="High">High</option>
-          <option value="Medium">Medium</option>
-          <option value="Low">Low</option>
-        </select>
-      </label>
-      <label>
-        Processing
-        <select id="processingStatusFilter">
-          <option value="">All</option>
-          <option value="ready">Ready</option>
-        </select>
-      </label>
-      <div class="search-actions">
-        <button type="submit">Search</button>
-        <button type="button" class="secondary" onclick="clearItemFilters()">Clear</button>
+    <section class="capture panel">
+      <textarea id="noteText" placeholder="Enter your thoughts, I’ll handle everything else. Type, or press 🎤 Speak and talk."></textarea>
+      <div class="capture-actions">
+        <button id="micButton" type="button" onclick="toggleVoiceCapture()">🎤 Speak</button>
+        <button id="addNoteButton" type="button" onclick="captureAndOrganize()">Add &amp; organize</button>
+        <span class="upload-inline">
+          <input type="file" id="fileInput" accept="image/*,application/pdf" />
+          <button id="uploadButton" type="button" class="secondary" onclick="uploadFile()">Read file</button>
+        </span>
       </div>
-    </form>
-    <p id="searchStatus" class="status muted" role="status" aria-live="polite"></p>
-    <div id="notes"></div>
+      <p id="noteStatus" class="status muted" role="status" aria-live="polite"></p>
+    </section>
+
+    <div class="layout">
+      <main class="main-col">
+        <div class="day-nav">
+          <button class="day-arrow" type="button" onclick="changeDay(-1)" aria-label="Previous day">&lsaquo;</button>
+          <h2 id="dayLabel">Today</h2>
+          <button class="day-arrow" type="button" onclick="changeDay(1)" aria-label="Next day">&rsaquo;</button>
+        </div>
+        <p id="taskStatus" class="status muted" role="status" aria-live="polite"></p>
+        <div id="dayView"></div>
+      </main>
+
+      <aside class="side-col">
+        <section class="panel">
+          <h3>Today’s time</h3>
+          <label class="time-budget">
+            Awake hours
+            <input type="number" id="dayBudget" min="1" max="24" step="0.5" value="16" oninput="renderTimePie()" />
+          </label>
+          <div id="timePie"></div>
+        </section>
+        <section class="panel">
+          <h3>Last week</h3>
+          <div id="weekSummary"></div>
+        </section>
+      </aside>
+    </div>
+
+    <details class="raw-notes">
+      <summary>Saved notes &amp; sources</summary>
+      <form id="itemSearchForm" class="search-toolbar" onsubmit="applyItemFilters(event)">
+        <label>
+          Search
+          <input id="itemSearch" type="search" maxlength="200" placeholder="Text or title" />
+        </label>
+        <label>
+          Type
+          <select id="itemTypeFilter">
+            <option value="">All</option>
+            <option value="text">Text</option>
+          </select>
+        </label>
+        <label>
+          Category
+          <select id="categoryFilter">
+            <option value="">All</option>
+          </select>
+        </label>
+        <label>
+          Priority
+          <select id="priorityFilter">
+            <option value="">All</option>
+            <option value="High">High</option>
+            <option value="Medium">Medium</option>
+            <option value="Low">Low</option>
+          </select>
+        </label>
+        <label>
+          Processing
+          <select id="processingStatusFilter">
+            <option value="">All</option>
+            <option value="ready">Ready</option>
+          </select>
+        </label>
+        <div class="search-actions">
+          <button type="submit">Search</button>
+          <button type="button" class="secondary" onclick="clearItemFilters()">Clear</button>
+        </div>
+      </form>
+      <p id="searchStatus" class="status muted" role="status" aria-live="polite"></p>
+      <div id="notes"></div>
+    </details>
   </div>
 
   <div id="taskModalBackdrop" class="modal-backdrop" hidden onclick="onModalBackdropClick(event)">

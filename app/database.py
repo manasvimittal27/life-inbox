@@ -127,6 +127,7 @@ class TaskRecord(Base):
     recurrence = Column(Text, nullable=True)
     importance = Column(Text, nullable=False, server_default="normal")
     effort_min = Column(Integer, nullable=False, server_default="60")
+    link = Column(Text, nullable=True)
 
 
 class TaskSourceItemRecord(Base):
@@ -554,6 +555,7 @@ def _structured_task_fields(todo: dict) -> dict:
         "recurrence": todo.get("recurrence"),
         "importance": todo.get("importance") or "normal",
         "effort_min": todo.get("effort_min") or 60,
+        "link": todo.get("link"),
     }
 
 
@@ -598,6 +600,7 @@ def _task_to_dict(session, task: TaskRecord, today_iso: Optional[str] = None) ->
         "recurrence": task.recurrence,
         "importance": task.importance,
         "effort_min": task.effort_min,
+        "link": task.link,
         "progress_pct": progress.pct if progress else 0,
         "progress_note": progress.note if progress else None,
         "progress_date": progress.progress_date if progress else None,
@@ -663,6 +666,7 @@ _EDITABLE_TASK_FIELDS = {
     "recurrence",
     "importance",
     "effort_min",
+    "link",
 }
 
 
