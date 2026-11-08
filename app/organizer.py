@@ -135,9 +135,29 @@ def _nth_of_month(today: date, n: int) -> Optional[date]:
     return None
 
 
+_NUM_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+
+
 def _resolve_date(lowered: str, today: date) -> Optional[str]:
     if "day after tomorrow" in lowered:
         return (today + timedelta(days=2)).isoformat()
+    # "in 2 days" / "2 days later" / "three days from now" → today + N.
+    offset = re.search(
+        r"\b(?:in\s+)?(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)"
+        r"\s+days?\s+(?:later|from now|from today|ahead)\b",
+        lowered,
+    ) or re.search(
+        r"\bin\s+(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+days?\b",
+        lowered,
+    )
+    if offset:
+        token = offset.group(1)
+        n = int(token) if token.isdigit() else _NUM_WORDS.get(token)
+        if n:
+            return (today + timedelta(days=n)).isoformat()
     if "tomorrow" in lowered:
         return (today + timedelta(days=1)).isoformat()
     if "today" in lowered or "tonight" in lowered:
@@ -379,6 +399,66 @@ def _fallback_single_note(text: str, today: date) -> list[dict]:
     }]
 
 
+def clean_transcript(text: str) -> str:
+    """De-garble a raw speech-to-text transcript before it is parsed.
+
+    Voice capture (Web Speech API) often mangles dictation — mis-hearings,
+    repeated/filler words, false starts (e.g. "today's letter 2 days later
+    today's later yeah that's it"). This runs ONE light LLM pass to fix obvious
+    transcription errors and drop filler, while preserving every real task,
+    date, time, name and number. It deliberately does NOT resolve relative dates
+    (keeps "tomorrow"/"2 days later" verbatim) — that's analyze_single_note's
+    job. No API key, an error, or empty input → the original text unchanged.
+    """
+    text = (text or "").strip()
+    if not text or not os.getenv("OPENAI_API_KEY"):
+        return text
+    try:
+        from openai import OpenAI
+        client = OpenAI()
+        prompt = f"""You clean raw speech-to-text transcripts before they are parsed into tasks.
+The text was dictated and may contain mis-hearings, repeated or filler words, and
+garbled fragments (e.g. "today's letter 2 days later today's later yeah that's it").
+
+Your ONLY job is to remove noise and fix mis-hearings — never to drop real content.
+
+CRITICAL — time and date phrases are the most important words to keep:
+- NEVER delete a time/date expression: "tomorrow", "tonight", "today", "2 days
+  later", "in 3 days", "next Friday", "this weekend", "the 12th", "6 p.m.", "4:30".
+- They are often buried inside garble. "today's letter 2 days later today's later"
+  is garble wrapped around the real phrase "2 days later" — KEEP "2 days later"
+  and attach it to the task it belongs to; drop only the surrounding noise.
+- Do NOT resolve or convert dates — keep them worded exactly as spoken.
+
+Also:
+- PRESERVE every real task, person's name, and number as intended.
+- Remove only clear filler and false starts ("um", "yeah that's it", repeated words).
+- Do NOT add information or invent tasks. When unsure whether a word is noise or
+  meaning, KEEP it. If the text is already clean, return it unchanged.
+
+Return ONLY the cleaned transcript text, nothing else.
+
+Transcript: {json.dumps(text)}
+"""
+        response = client.responses.create(
+            model=PARSE_MODEL,
+            input=prompt,
+            **_kwargs_for(PARSE_MODEL),
+        )
+        cleaned = (response.output_text or "").strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.replace("```", "").strip()
+        # Models sometimes echo the text wrapped in quotes — unwrap a single
+        # pair that spans the whole string.
+        if len(cleaned) >= 2 and cleaned[0] in "\"'" and cleaned[-1] == cleaned[0]:
+            cleaned = cleaned[1:-1].strip()
+        # Guard against a model that returns nothing or a refusal.
+        return cleaned or text
+    except Exception:
+        logger.exception("Transcript cleanup failed; using original text")
+        return text
+
+
 def analyze_single_note(text: str, today: Optional[date] = None) -> list[dict]:
     """Fast path: turn ONE note into its structured to-do(s). Much faster than
     re-analyzing the whole inbox."""
@@ -421,6 +501,10 @@ return must come from the user's Note at the bottom, never from these instructio
 TIMING (today's date is given above — compute from it):
 - Resolve ALL timing to a real ISO date. No date given → today. A bare time
   ("9pm") or "tonight" → today. "next <weekday>"/"<weekday>" → the coming one.
+- "in N days" / "N days later" / "N days from now" → exactly N days from TODAY
+  (the date given above), e.g. "2 days later" = today + 2. Count from TODAY, NOT
+  from another task's date, UNLESS the note explicitly says "N days after <that
+  event>". "day after tomorrow" = today + 2.
 - "the Nth"/"on the 12th"/"before the Nth" → the Nth of the CURRENT month, BUT if
   that day has already passed this month, use the Nth of NEXT month instead.
 - "this weekend"/"the weekend" → the coming Saturday. "next weekend" → the Saturday

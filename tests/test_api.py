@@ -1177,6 +1177,68 @@ def test_openai_failure_fallback_omits_technical_details(monkeypatch):
     assert "super-secret" not in repr(result)
 
 
+def test_resolve_schedule_handles_relative_day_offsets():
+    from datetime import date
+
+    from app import organizer
+
+    today = date(2026, 11, 9)  # Monday
+
+    def due(text):
+        return organizer.resolve_schedule(text, today)["due_date"]
+
+    assert due("in 2 days") == "2026-11-11"
+    assert due("2 days later") == "2026-11-11"
+    assert due("two days later") == "2026-11-11"
+    assert due("three days from now") == "2026-11-12"
+    assert due("in a day") == "2026-11-10"
+    assert due("day after tomorrow") == "2026-11-11"
+
+
+def test_clean_transcript_is_noop_without_api_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    from app import organizer
+
+    text = "today's letter 2 days later today's later yeah that's it"
+    assert organizer.clean_transcript(text) == text
+
+
+def test_organize_voice_source_cleans_and_saves_transcript(client, monkeypatch):
+    main = sys.modules["app.main"]
+    monkeypatch.setattr(
+        main, "clean_transcript", lambda _t: "Call Sam tomorrow"
+    )
+    item = client.post(
+        "/api/items", json={"raw_text": "caall sam tmrw yeah thats it"}
+    ).json()
+
+    response = client.post(f"/api/items/{item['id']}/organize?source=voice")
+
+    assert response.status_code == 200
+    # The garbled transcript was replaced with the cleaned text.
+    assert client.get("/api/items").json()[0]["raw_text"] == "Call Sam tomorrow"
+
+
+def test_organize_without_voice_does_not_clean(client, monkeypatch):
+    main = sys.modules["app.main"]
+    calls = {"n": 0}
+
+    def spy(_t):
+        calls["n"] += 1
+        return "SHOULD NOT BE USED"
+
+    monkeypatch.setattr(main, "clean_transcript", spy)
+    item = client.post(
+        "/api/items", json={"raw_text": "Call Sam tomorrow"}
+    ).json()
+
+    response = client.post(f"/api/items/{item['id']}/organize")
+
+    assert response.status_code == 200
+    assert calls["n"] == 0  # typed notes are never run through cleanup
+    assert client.get("/api/items").json()[0]["raw_text"] == "Call Sam tomorrow"
+
+
 def test_upload_image_creates_item_and_feeds_analysis(client, monkeypatch):
     main = sys.modules["app.main"]
     monkeypatch.setattr(

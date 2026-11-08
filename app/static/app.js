@@ -147,6 +147,9 @@ async function fetchJson(url, options, friendlyError) {
 
 let recognition = null;
 let isListening = false;
+// True once speech has filled the box, so organize can de-garble the transcript.
+// Cleared the moment the user types (they've reviewed/edited it themselves).
+let voiceUsed = false;
 
 function setMicState(listening) {
   const btn = document.getElementById('micButton');
@@ -188,6 +191,7 @@ function toggleVoiceCapture() {
       const transcript = event.results[i][0].transcript;
       if (event.results[i].isFinal) {
         finalText += transcript + ' ';
+        voiceUsed = true;  // spoken text present → clean it up before parsing
       } else {
         interim += transcript;
       }
@@ -1239,6 +1243,10 @@ function stopAnalyzing() {
 }
 
 async function runCapture(text) {
+  // Capture whether this note came from speech BEFORE addNote clears state, so
+  // the organize step can de-garble a raw transcript.
+  const wasVoice = voiceUsed;
+  voiceUsed = false;
   const item = await addNote();  // saves + clears the box, returns the item
   if (!item || document.getElementById('noteText').value.trim()) return;
 
@@ -1247,10 +1255,11 @@ async function runCapture(text) {
   let created = [];
   try {
     created = await fetchJson(
-      `/api/items/${item.id}/organize`,
+      `/api/items/${item.id}/organize${wasVoice ? '?source=voice' : ''}`,
       {method: 'POST'},
       'Unable to organize this note.'
     ) || [];
+    if (wasVoice) await loadNotes();  // show the cleaned-up note text
     await loadTasks();
   } catch {
     setStatus('noteStatus', 'Saved, but could not organize it. Try again.', true);
@@ -1424,6 +1433,12 @@ function handleGmailReturn() {
     {}, '', window.location.pathname + (qs ? `?${qs}` : '')
   );
 }
+
+// Manual typing means the user reviewed/edited the text themselves, so don't
+// treat it as a raw transcript. (Speech sets textarea.value programmatically,
+// which does NOT fire 'input', so this only resets on real keystrokes.)
+document.getElementById('noteText')
+  ?.addEventListener('input', () => { voiceUsed = false; });
 
 syncControlsFromUrl();
 restoreDayBudget();

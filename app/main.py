@@ -39,6 +39,7 @@ from app.database import (
 from app.organizer import (
     analyze_inbox_with_openai,
     analyze_single_note,
+    clean_transcript,
     estimate_progress,
     extract_content_from_file,
     validate_analysis_result,
@@ -86,13 +87,25 @@ def create_item(payload: InboxItemCreate):
 
 
 @app.post("/api/items/{item_id}/organize", response_model=List[Task])
-def organize_item(item_id: int):
-    """Fast path: analyze just this one note and create its task(s)."""
+def organize_item(item_id: int, source: Optional[str] = Query(None, max_length=20)):
+    """Fast path: analyze just this one note and create its task(s).
+
+    When ``source=voice``, the note is a raw speech-to-text transcript, so it
+    first goes through a light de-garbling pass; the cleaned text is saved back
+    to the item so the saved note matches what was parsed.
+    """
     item = get_item_from_db(item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Item not found.")
     try:
-        todos = analyze_single_note(item.get("raw_text") or "")
+        text = item.get("raw_text") or ""
+        if source == "voice" and text.strip():
+            cleaned = clean_transcript(text)
+            if cleaned and cleaned != text:
+                updated = update_item_in_db(item_id, cleaned)
+                if updated is not None:
+                    text = cleaned
+        todos = analyze_single_note(text)
         return create_tasks_for_item(item_id, todos)
     except Exception as exc:
         logger.exception("Failed to organize item")
