@@ -1250,8 +1250,89 @@ function restoreDayBudget() {
   } catch (e) { /* ignore */ }
 }
 
+// --- Gmail inbound sync -----------------------------------------------------
+
+let gmailConnected = false;
+
+function setGmailButton(connected) {
+  gmailConnected = connected;
+  const btn = document.getElementById('gmailButton');
+  if (!btn) return;
+  btn.textContent = connected ? 'Sync Gmail' : 'Connect Gmail';
+  btn.title = connected
+    ? 'Pull recent emails and turn them into tasks'
+    : 'Connect your Gmail (read-only) to turn emails into tasks';
+}
+
+async function refreshGmailStatus() {
+  try {
+    const status = await fetchJson('/api/gmail/status', undefined, '');
+    setGmailButton(Boolean(status && status.connected));
+  } catch {
+    setGmailButton(false);
+  }
+}
+
+function gmailAction() {
+  if (gmailConnected) {
+    syncGmail();
+  } else {
+    // Hand off to Google's consent screen; the callback returns us to "/".
+    window.location.href = '/api/gmail/auth';
+  }
+}
+
+async function syncGmail() {
+  setButtonBusy('gmailButton', true, 'Syncing…', 'Sync Gmail');
+  setStatus('noteStatus', 'Checking your inbox…');
+  try {
+    const result = await fetchJson(
+      '/api/gmail/sync',
+      {method: 'POST'},
+      'Unable to sync Gmail.'
+    );
+    const created = (result && result.created_tasks) || [];
+    const newEmails = (result && result.new_emails) || 0;
+    if (!newEmails) {
+      setStatus('noteStatus', 'No new emails to turn into tasks.');
+    } else {
+      const n = created.length;
+      setStatus(
+        'noteStatus',
+        `Pulled ${newEmails} new email${newEmails === 1 ? '' : 's'} → ` +
+        `${n} actionable${n === 1 ? '' : 's'} added.`
+      );
+    }
+    await loadNotes();
+    await loadTasks();
+  } catch {
+    setStatus('noteStatus', 'Could not sync Gmail. Please try again.', true);
+  } finally {
+    setButtonBusy('gmailButton', false, 'Syncing…', 'Sync Gmail');
+  }
+}
+
+function handleGmailReturn() {
+  const params = new URLSearchParams(window.location.search);
+  const flag = params.get('gmail');
+  if (!flag) return;
+  if (flag === 'connected') {
+    setStatus('noteStatus', 'Gmail connected. Click “Sync Gmail” to pull your emails.');
+  } else if (flag === 'error') {
+    setStatus('noteStatus', 'Gmail connection was cancelled or failed.', true);
+  }
+  // Clean the flag out of the URL so a refresh doesn't repeat the message.
+  params.delete('gmail');
+  const qs = params.toString();
+  window.history.replaceState(
+    {}, '', window.location.pathname + (qs ? `?${qs}` : '')
+  );
+}
+
 syncControlsFromUrl();
 restoreDayBudget();
+handleGmailReturn();
+refreshGmailStatus();
 updateDayLabel();
 loadNotes();
 loadTasks();

@@ -7,5 +7,8 @@ alembic
 openai
 python-dotenv
 requests
+google-auth
+google-auth-oauthlib
+google-api-python-client
 pytest
 httpx

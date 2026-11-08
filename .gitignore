@@ -1,6 +1,12 @@
 # Secrets
 .env
 
+# Gmail OAuth secrets and tokens (also covered by data/ below; listed
+# explicitly so they stay ignored even if configured elsewhere).
+gmail_client_secret.json
+gmail_token.json
+*gmail_client_secret*.json
+
 # Python
 .venv/
 __pycache__/

@@ -28,6 +28,9 @@
           <input type="file" id="fileInput" accept="image/*,application/pdf" />
           <button id="uploadButton" type="button" class="secondary" onclick="uploadFile()">Read file</button>
         </span>
+        <span class="gmail-inline">
+          <button id="gmailButton" type="button" class="secondary" onclick="gmailAction()">Connect Gmail</button>
+        </span>
       </div>
       <p id="noteStatus" class="status muted" role="status" aria-live="polite"></p>
     </section>
@@ -75,6 +78,7 @@
           <select id="itemTypeFilter">
             <option value="">All</option>
             <option value="text">Text</option>
+            <option value="email">Email</option>
           </select>
         </label>
         <label>

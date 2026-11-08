@@ -3,9 +3,11 @@ from datetime import date
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile, status
-from fastapi.responses import HTMLResponse, Response
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+from app import gmail_sync
 
 from app.database import (
     IMAGE_ITEM_TYPE,
@@ -420,6 +422,82 @@ def analyze_inbox():
         raise HTTPException(
             status_code=500,
             detail="Unable to analyze inbox. Please try again.",
+        ) from exc
+
+
+def _gmail_redirect_uri(request: Request) -> str:
+    return str(request.url_for("gmail_callback"))
+
+
+@app.get("/api/gmail/status")
+def gmail_status():
+    """Report whether Gmail is configured (client secret present) and whether
+    the user has connected an account (a usable token is stored)."""
+    try:
+        configured = gmail_sync.client_secret_configured()
+        connected = gmail_sync.is_connected() if configured else False
+    except Exception:
+        logger.exception("Failed to read Gmail status")
+        configured = False
+        connected = False
+    return {"configured": configured, "connected": connected}
+
+
+@app.get("/api/gmail/auth")
+def gmail_auth(request: Request):
+    """Send the user to Google's consent screen."""
+    try:
+        url = gmail_sync.build_authorization_url(_gmail_redirect_uri(request))
+    except gmail_sync.GmailNotConfigured as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Gmail is not set up yet. Add your Google OAuth client secret "
+                "first (see the README)."
+            ),
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to start Gmail OAuth")
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to start Gmail connection. Please try again.",
+        ) from exc
+    return RedirectResponse(url)
+
+
+@app.get("/api/gmail/callback", name="gmail_callback")
+def gmail_callback(request: Request, code: Optional[str] = None, error: Optional[str] = None):
+    """OAuth redirect target: exchange the code for a token, then return home."""
+    if error or not code:
+        return RedirectResponse("/?gmail=error")
+    try:
+        gmail_sync.exchange_code(_gmail_redirect_uri(request), code)
+    except Exception:
+        logger.exception("Failed to complete Gmail OAuth")
+        return RedirectResponse("/?gmail=error")
+    return RedirectResponse("/?gmail=connected")
+
+
+@app.post("/api/gmail/sync")
+def gmail_sync_now(
+    max_results: int = Query(
+        gmail_sync.DEFAULT_MAX_RESULTS, ge=1, le=50
+    ),
+):
+    """Pull recent emails, turn the new ones into tasks, and report the counts.
+    Idempotent: already-synced emails are skipped."""
+    try:
+        return gmail_sync.sync_recent_emails(max_results=max_results)
+    except gmail_sync.GmailNotConnected as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Gmail is not connected yet. Connect your account first.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to sync Gmail")
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to sync Gmail right now. Please try again.",
         ) from exc
 
 

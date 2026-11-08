@@ -143,6 +143,39 @@ $env:OPENAI_MODEL="gpt-5-mini"
 
 Do not put the real key in source code or commit it to Git.
 
+## 4b. Optional: connect Gmail (read-only inbound sync)
+
+Life Inbox can turn recent emails into dated, prioritised tasks using the same
+parser as typed notes. The connection is **read-only** (`gmail.readonly`) — it
+only lists and reads messages, and never sends, modifies, or deletes mail.
+
+One-time Google setup:
+
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/) and
+   create (or pick) a project.
+2. **APIs & Services → Library →** enable the **Gmail API**.
+3. **APIs & Services → OAuth consent screen:** choose *External*, fill in the
+   app name and your email, and add your own Google account under **Test
+   users** (so you can consent while the app is unverified).
+4. **APIs & Services → Credentials → Create credentials → OAuth client ID.**
+   Choose **Web application**, and under *Authorized redirect URIs* add:
+   `http://localhost:8000/api/gmail/callback`
+   (match the host/port you run the app on).
+5. Download the client-secret JSON and save it as
+   `data/gmail_client_secret.json` (this path is gitignored). To use a
+   different path, set `GOOGLE_CLIENT_SECRET_FILE` in your environment.
+
+Then, with the app running, click **Connect Gmail** next to the capture box,
+approve the read-only scope, and you'll be returned to Life Inbox. Click
+**Sync Gmail** to pull your recent inbox messages — each new email becomes an
+inbox item and is organised into tasks with a link straight back to the email.
+Re-syncing is safe: emails already imported (tracked by their Gmail message id)
+are skipped, so tasks are never duplicated.
+
+Your OAuth token is cached at `data/gmail_token.json` (gitignored; override with
+`GMAIL_TOKEN_FILE`). Never commit `data/gmail_client_secret.json` or
+`data/gmail_token.json`.
+
 ## 5. Start Life Inbox
 
 From the top-level `life-inbox` folder, run:
