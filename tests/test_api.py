@@ -1318,6 +1318,63 @@ def test_upload_rejects_empty_file(client):
     assert response.status_code == 400
 
 
+def test_organize_links_all_tasks_and_deletes_cleanly(client, monkeypatch):
+    main = sys.modules["app.main"]
+    monkeypatch.setattr(
+        main,
+        "analyze_single_note",
+        lambda _text: [
+            {"task": "Study for exam A", "bucket": "P0"},
+            {"task": "Study for exam B", "bucket": "P0"},
+            {"task": "Go to the party", "bucket": "P2"},
+        ],
+    )
+    item = client.post(
+        "/api/items", json={"raw_text": "two exams and a party"}
+    ).json()
+
+    created = client.post(f"/api/items/{item['id']}/organize").json()
+
+    assert len(created) == 3
+    # Every task — not just the first — links back to its source note.
+    for task in created:
+        assert task["source_item_ids"] == [item["id"]]
+    assert len(client.get("/api/tasks").json()) == 3
+
+    # Deleting the source note removes ALL of its tasks (no orphans left).
+    assert client.delete(f"/api/items/{item['id']}").status_code == 204
+    assert client.get("/api/tasks?status=all").json() == []
+
+
+def test_reorganize_prunes_surplus_and_keeps_progress(client, monkeypatch):
+    main = sys.modules["app.main"]
+    runs = iter(
+        [
+            [
+                {"task": "Task A", "bucket": "P0"},
+                {"task": "Task B", "bucket": "P1"},
+                {"task": "Task C", "bucket": "P2"},
+            ],
+            [{"task": "Task A refined", "bucket": "P0"}],  # fewer this time
+        ]
+    )
+    monkeypatch.setattr(main, "analyze_single_note", lambda _text: next(runs))
+    item = client.post("/api/items", json={"raw_text": "stuff"}).json()
+
+    first = client.post(f"/api/items/{item['id']}/organize").json()
+    assert len(first) == 3
+    client.post(f"/api/tasks/{first[0]['id']}/progress", json={"pct": 50})
+
+    second = client.post(f"/api/items/{item['id']}/organize").json()
+
+    assert len(second) == 1
+    tasks = client.get("/api/tasks?status=all").json()
+    assert len(tasks) == 1  # the two surplus tasks were pruned
+    assert tasks[0]["id"] == first[0]["id"]  # slot 0 refreshed in place
+    assert tasks[0]["text"] == "Task A refined"
+    assert tasks[0]["progress_pct"] == 50  # progress survived the re-organize
+
+
 def test_deleting_item_removes_its_orphaned_task(client):
     item = client.post(
         "/api/items",

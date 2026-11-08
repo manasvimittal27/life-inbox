@@ -136,9 +136,10 @@ class TaskRecord(Base):
 
 class TaskSourceItemRecord(Base):
     __tablename__ = "task_source_items"
-    __table_args__ = (
-        UniqueConstraint("item_id", name="uq_task_source_items_item_id"),
-    )
+    # NOTE: historically item_id was UNIQUE (one task per source note). That is
+    # removed (migration 0011) so a single note/email can produce SEVERAL tasks,
+    # each linked to its source — the composite PK still prevents a duplicate
+    # (task, item) pair.
 
     task_id = Column(
         Integer,
@@ -603,28 +604,26 @@ def create_tasks_for_item(item_id: int, todos: list[dict]) -> list[dict]:
             .order_by(TaskRecord.id.asc())
         ).all()
 
+        todos = todos or []
         result_ids: list[int] = []
-        for idx, todo in enumerate(todos or []):
+        for idx, todo in enumerate(todos):
             structured = _structured_task_fields(todo)
             priority = _BUCKET_TO_PRIORITY.get(structured["bucket"], "Medium")
+            dedup = _item_task_dedup_key(item_id, idx, todo.get("task", ""))
 
-            if idx == 0 and existing:
-                # Refresh the note's primary task in place (keeps status/progress).
-                task = existing[0]
-                task.text = todo.get("task", task.text)
+            if idx < len(existing):
+                # Refresh the note's existing task at this slot in place, so its
+                # status and logged progress survive a re-organize.
+                task = existing[idx]
+                task.text = todo.get("task", "").strip() or task.text
                 task.priority = priority
+                task.dedup_key = dedup
                 for key, value in structured.items():
                     setattr(task, key, value)
                 task.updated_at = now
                 result_ids.append(task.id)
                 continue
 
-            dedup = (
-                _task_dedup_key([item_id]) if idx == 0
-                else hashlib.sha256(
-                    f"{item_id}:{idx}:{todo.get('task', '')}".encode("utf-8")
-                ).hexdigest()
-            )
             task = TaskRecord(
                 text=todo.get("task", "").strip() or "Untitled",
                 priority=priority,
@@ -637,17 +636,44 @@ def create_tasks_for_item(item_id: int, todos: list[dict]) -> list[dict]:
             )
             session.add(task)
             session.flush()
-            if idx == 0:
-                session.add(
-                    TaskSourceItemRecord(task_id=task.id, item_id=item_id)
-                )
+            # Every task from this note links back to it, so deleting the note
+            # cleans up all of them and each task tracks its source.
+            session.add(
+                TaskSourceItemRecord(task_id=task.id, item_id=item_id)
+            )
             result_ids.append(task.id)
+
+        # A re-organize that yields FEWER tasks than before removes the leftover
+        # ones (and their progress/links) so stale tasks don't pile up.
+        for task in existing[len(todos):]:
+            session.execute(
+                delete(TaskSourceItemRecord).where(
+                    TaskSourceItemRecord.task_id == task.id
+                )
+            )
+            session.execute(
+                delete(TaskProgressRecord).where(
+                    TaskProgressRecord.task_id == task.id
+                )
+            )
+            session.delete(task)
 
         session.commit()
         return [
             _task_to_dict(session, session.get(TaskRecord, tid))
             for tid in result_ids
         ]
+
+
+def _item_task_dedup_key(item_id: int, idx: int, task_text: str) -> str:
+    """A stable, unique dedup key for the idx-th task of one note. The first
+    task keeps the source-item fingerprint (compatible with the bulk path); the
+    rest fold in their position so one note can own several distinct tasks."""
+    if idx == 0:
+        return _task_dedup_key([item_id])
+    return hashlib.sha256(
+        f"{item_id}:{idx}:{task_text}".encode("utf-8")
+    ).hexdigest()
 
 
 def _structured_task_fields(todo: dict) -> dict:
