@@ -1125,8 +1125,7 @@ async function saveTaskEdit() {
 async function analyzeInbox() {
   if (isAnalyzingInbox) return;
   isAnalyzingInbox = true;
-  const thinking = document.getElementById('thinking');
-  if (thinking) thinking.hidden = false;
+  startAnalyzing();
   try {
     await fetchJson('/api/analyze', {method: 'POST'}, 'Unable to analyze inbox.');
     await loadTasks();
@@ -1138,7 +1137,7 @@ async function analyzeInbox() {
     );
   } finally {
     isAnalyzingInbox = false;
-    if (thinking) thinking.hidden = true;
+    stopAnalyzing();
   }
 }
 
@@ -1169,13 +1168,47 @@ async function captureAndOrganize() {
   }
 }
 
+const ANALYZING_MESSAGES = [
+  'Reading your thoughts',
+  'Analyzing and prioritizing for you',
+  'Sorting into P0 · P1 · P2',
+  'Almost there',
+];
+let analyzingTimer = null;
+
+function startAnalyzing() {
+  const panel = document.getElementById('thinking');
+  const msg = document.getElementById('analyzingMsg');
+  if (!panel) return;
+  panel.hidden = false;
+  if (!msg) return;
+  let i = 0;
+  msg.classList.remove('fade');
+  msg.textContent = ANALYZING_MESSAGES[0];
+  clearInterval(analyzingTimer);
+  analyzingTimer = setInterval(() => {
+    msg.classList.add('fade');               // fade out
+    setTimeout(() => {
+      i = (i + 1) % ANALYZING_MESSAGES.length;
+      msg.textContent = ANALYZING_MESSAGES[i];
+      msg.classList.remove('fade');          // fade back in
+    }, 250);
+  }, 1500);
+}
+
+function stopAnalyzing() {
+  clearInterval(analyzingTimer);
+  analyzingTimer = null;
+  const panel = document.getElementById('thinking');
+  if (panel) panel.hidden = true;
+}
+
 async function runCapture(text) {
   const item = await addNote();  // saves + clears the box, returns the item
   if (!item || document.getElementById('noteText').value.trim()) return;
 
   // Fast path: analyze ONLY this new note (not the whole inbox).
-  const thinking = document.getElementById('thinking');
-  if (thinking) thinking.hidden = false;
+  startAnalyzing();
   let created = [];
   try {
     created = await fetchJson(
@@ -1188,7 +1221,7 @@ async function runCapture(text) {
     setStatus('noteStatus', 'Saved, but could not organize it. Try again.', true);
     return;
   } finally {
-    if (thinking) thinking.hidden = true;
+    stopAnalyzing();
   }
   if (!created.length) {
     setStatus('noteStatus', 'Saved to your inbox.');
