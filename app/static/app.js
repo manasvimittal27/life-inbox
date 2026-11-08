@@ -693,14 +693,22 @@ function dayTasksFor(dateIso) {
   for (const t of lastTasks) {
     if (t.status === 'dismissed') continue;
     if (t.task_type === 'recurring') {
-      // A recurring task runs from the day it was created through its deadline
-      // (due_date), inclusive. No deadline = an open-ended habit that repeats
-      // forever. Past the deadline it disappears — you don't study for an exam
-      // after it's over.
+      // A recurring task runs from the day it was created until its deadline.
+      // No deadline = an open-ended habit that repeats forever. With a deadline
+      // (e.g. an exam/submission), it's PREP that runs up to the day BEFORE the
+      // deadline; on the deadline day itself it becomes the event (the exam /
+      // submission), not another study day; past the deadline it disappears.
       const startIso = t.created_at ? localIso(new Date(t.created_at)) : null;
       const afterStart = !startIso || dateIso >= startIso;
-      const beforeDeadline = !t.due_date || dateIso <= t.due_date;
-      if (afterStart && beforeDeadline) out.push(t);
+      if (!afterStart) continue;
+      if (!t.due_date) {
+        out.push(t);                                   // open-ended habit
+      } else if (dateIso < t.due_date) {
+        out.push(t);                                   // a prep day
+      } else if (dateIso === t.due_date) {
+        out.push({...t, _deadlineEvent: true});        // the deadline itself
+      }
+      // after due_date: it's over, show nothing
     } else if (t.due_date === dateIso) {
       out.push(t);
     } else if (dateIso === todayIso && t.status === 'open' && !t.due_date) {
@@ -771,7 +779,34 @@ function meetingJoinHtml(task) {
   return `<a class="join-link" href="${esc(clean)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
 }
 
+function deadlineEventTitle(text) {
+  // "Study for Tarun's submission" -> "Tarun's submission"; the deadline day
+  // shows the deliverable itself, not the prep. Falls back to the full text.
+  const t = (text || '').trim();
+  const m = t.match(
+    /^(?:study(?:ing)?|prepare|preparing|prep|revise|revising|practice|practise|work|working)\s+(?:for\s+|on\s+)?(.+)$/i
+  );
+  if (m && m[1] && m[1].trim()) {
+    const s = m[1].trim();
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+  return t;
+}
+
 function renderDayTaskHtml(task) {
+  if (task._deadlineEvent) {
+    // The deadline day: the recurring prep task becomes the event itself.
+    const title = deadlineEventTitle(task.text);
+    const star = task.importance === 'high' ? ' <span class="star">★</span>' : '';
+    const effort = task.effort_min ? `<span class="task-effort">${task.effort_min}m</span>` : '';
+    return `<div class="task-row task-event" data-task-id="${task.id}">
+      <div class="task-row-main">
+        <span class="task-row-text">${esc(title)}${star} <span class="event-tag">due today</span></span>
+      </div>
+      <div class="task-row-meta"><span class="task-sched">📌 ${esc(formatDueDate(task.due_date))}</span>${effort}</div>
+      ${taskHoverActionsHtml(task.id)}
+    </div>`;
+  }
   const doneClass = task.status === 'completed' ? ' task-row-done' : '';
   const sched = task.task_type === 'recurring'
     ? `🔁 ${task.recurrence || 'recurring'}`

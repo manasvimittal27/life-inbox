@@ -211,6 +211,12 @@ textarea:focus, input:focus, select:focus {
 .star { color: var(--p1-fg); }
 .anytime { color: var(--muted); font-size: 11px; font-weight: 600; background: var(--surface-2); padding: 1px 7px; border-radius: 999px; }
 .overdue { color: var(--danger); font-size: 11px; font-weight: 600; }
+.task-event { border-left: 3px solid var(--p0-fg); }
+.event-tag {
+  color: var(--p0-fg); background: var(--p0-bg);
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.03em;
+  padding: 1px 7px; border-radius: 999px; text-transform: uppercase;
+}
 .join-link {
   display: inline-block; background: var(--primary); color: #fff;
   padding: 3px 11px; border-radius: 999px; font-size: 12px; font-weight: 600; text-decoration: none;
