@@ -425,4 +425,13 @@ def analyze_inbox():
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return (APP_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+    html = (APP_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+    # Cache-bust static assets by their file mtime so edits always load without
+    # a hard refresh (browsers otherwise serve a stale app.js/styles.css).
+    for asset in ("app.js", "styles.css"):
+        try:
+            ver = int((APP_DIR / "static" / asset).stat().st_mtime)
+        except OSError:
+            continue
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={ver}")
+    return html

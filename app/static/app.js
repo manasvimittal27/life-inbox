@@ -693,7 +693,14 @@ function dayTasksFor(dateIso) {
   for (const t of lastTasks) {
     if (t.status === 'dismissed') continue;
     if (t.task_type === 'recurring') {
-      out.push(t);
+      // A recurring task runs from the day it was created through its deadline
+      // (due_date), inclusive. No deadline = an open-ended habit that repeats
+      // forever. Past the deadline it disappears — you don't study for an exam
+      // after it's over.
+      const startIso = t.created_at ? localIso(new Date(t.created_at)) : null;
+      const afterStart = !startIso || dateIso >= startIso;
+      const beforeDeadline = !t.due_date || dateIso <= t.due_date;
+      if (afterStart && beforeDeadline) out.push(t);
     } else if (t.due_date === dateIso) {
       out.push(t);
     } else if (dateIso === todayIso && t.status === 'open' && !t.due_date) {
@@ -1136,12 +1143,33 @@ async function analyzeInbox() {
 }
 
 // One-tap flow: save the thought, organize it, and show where it landed.
+let isCapturing = false;
+let lastCapture = {text: '', at: 0};
+
 async function captureAndOrganize() {
   const text = document.getElementById('noteText').value.trim();
   if (!text) {
     setStatus('noteStatus', 'Enter a thought first — or press 🎤 Speak.', true);
     return;
   }
+  // Double-submit guard: ignore a second trigger while one is in flight, and
+  // swallow an identical note re-sent within 10s (rapid double-tap or voice+click).
+  if (isCapturing) return;
+  if (text === lastCapture.text && Date.now() - lastCapture.at < 10000) {
+    setStatus('noteStatus', 'Already added that one just now.');
+    document.getElementById('noteText').value = '';
+    return;
+  }
+  isCapturing = true;
+  lastCapture = {text, at: Date.now()};
+  try {
+    await runCapture(text);
+  } finally {
+    isCapturing = false;
+  }
+}
+
+async function runCapture(text) {
   const item = await addNote();  // saves + clears the box, returns the item
   if (!item || document.getElementById('noteText').value.trim()) return;
 
