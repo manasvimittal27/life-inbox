@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import date
 from pathlib import Path
 from typing import List, Optional
@@ -426,7 +427,16 @@ def analyze_inbox():
 
 
 def _gmail_redirect_uri(request: Request) -> str:
-    return str(request.url_for("gmail_callback"))
+    # Google treats 127.0.0.1 and localhost as DIFFERENT redirect URIs, so the
+    # callback we send must exactly match what's registered on the OAuth client.
+    # Normalize the loopback host to "localhost" (what the setup docs register)
+    # so it works whether the user browses via localhost or 127.0.0.1. Override
+    # with GMAIL_REDIRECT_URI if you host the app elsewhere.
+    override = os.getenv("GMAIL_REDIRECT_URI")
+    if override:
+        return override
+    uri = str(request.url_for("gmail_callback"))
+    return uri.replace("://127.0.0.1", "://localhost")
 
 
 @app.get("/api/gmail/status")

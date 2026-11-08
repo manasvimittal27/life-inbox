@@ -27,6 +27,11 @@ from app.organizer import analyze_single_note
 
 logger = logging.getLogger(__name__)
 
+# Google may return a broader set of granted scopes than we asked for (e.g. if
+# the same account already granted Calendar to another OAuth client). Relax the
+# strict scope-equality check so the token exchange tolerates that.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
 # Read-only: list and read messages, never send or modify.
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
@@ -77,15 +82,23 @@ def _build_flow(redirect_uri: str):
         scopes=SCOPES,
         redirect_uri=redirect_uri,
     )
+    # We build a fresh Flow for the auth step and again for the token exchange
+    # (two separate HTTP requests), so a PKCE code_verifier generated during
+    # authorization would be lost by exchange time ("Missing code verifier").
+    # This is a confidential client (it has a client_secret), so disable PKCE
+    # and authenticate the exchange with the secret instead.
+    flow.autogenerate_code_verifier = False
     return flow
 
 
 def build_authorization_url(redirect_uri: str) -> str:
     """Return the Google consent-screen URL to send the user to."""
     flow = _build_flow(redirect_uri)
+    # include_granted_scopes="false": do NOT merge scopes previously granted to
+    # other OAuth clients on this account, so we only ever ask for gmail.readonly.
     auth_url, _state = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
+        include_granted_scopes="false",
         prompt="consent",
     )
     return auth_url
@@ -253,22 +266,27 @@ def message_to_note_text(parsed: dict) -> str:
 # --- Fetch + sync -----------------------------------------------------------
 
 
+# Gmail search query for which inbox messages to pull. Default is the whole
+# inbox (newest first). We deliberately DON'T filter by "category:primary":
+# Google Workspace accounts usually have category tabs disabled, so that filter
+# returns zero results there. Override via GMAIL_SYNC_QUERY (e.g. "is:unread",
+# "category:primary", "newer_than:7d") if you want a narrower pull.
+INBOX_QUERY = os.getenv("GMAIL_SYNC_QUERY", "").strip()
+
+
 def list_recent_messages(
     service, max_results: int = DEFAULT_MAX_RESULTS
 ) -> list[dict]:
-    """List recent primary-inbox messages and return parsed dicts, newest
-    first. ``service`` is a Gmail API service (real or a test fake)."""
-    listed = (
-        service.users()
-        .messages()
-        .list(
-            userId="me",
-            maxResults=max_results,
-            labelIds=["INBOX"],
-            q="category:primary",
-        )
-        .execute()
+    """List recent inbox messages and return parsed dicts, newest first.
+    ``service`` is a Gmail API service (real or a test fake)."""
+    list_kwargs = dict(
+        userId="me",
+        maxResults=max_results,
+        labelIds=["INBOX"],
     )
+    if INBOX_QUERY:
+        list_kwargs["q"] = INBOX_QUERY
+    listed = service.users().messages().list(**list_kwargs).execute()
     messages = listed.get("messages") or []
     parsed: list[dict] = []
     for stub in messages:

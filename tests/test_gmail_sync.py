@@ -243,6 +243,22 @@ def test_sync_creates_tasks_with_email_links(gmail_env):
         assert t["bucket"] == "P1"
 
 
+def test_list_query_does_not_filter_by_category_primary(gmail_env):
+    # Workspace accounts have category tabs disabled, so "category:primary"
+    # returns nothing there. The default pull must be the whole INBOX.
+    gmail_sync = gmail_env["gmail_sync"]
+    service = FakeGmailService(
+        [_raw_message("m1", "Hi", "a@b.com", "body")]
+    )
+
+    gmail_sync.list_recent_messages(service, max_results=5)
+
+    assert service.list_calls, "expected a messages.list call"
+    call = service.list_calls[0]
+    assert call["labelIds"] == ["INBOX"]
+    assert "category:primary" not in (call.get("q") or "")
+
+
 def test_resync_is_idempotent(gmail_env):
     gmail_sync = gmail_env["gmail_sync"]
     database = gmail_env["database"]
