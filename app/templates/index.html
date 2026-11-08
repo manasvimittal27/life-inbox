@@ -42,9 +42,12 @@
           <h2 id="dayLabel">Today</h2>
           <button class="day-arrow" type="button" onclick="changeDay(1)" aria-label="Next day">&rsaquo;</button>
         </div>
-        <div id="thinking" class="thinking" hidden>
-          <span class="dots animate" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span>Organizing into P0 / P1 / P2…</span>
+        <div id="thinking" class="analyzing" hidden role="status" aria-live="polite">
+          <span class="orb" aria-hidden="true">
+            <span class="dots animate"><i></i><i></i><i></i></span>
+          </span>
+          <span id="analyzingMsg" class="analyzing-msg">Analyzing and prioritizing for you</span>
+          <span class="analyzing-bar" aria-hidden="true"></span>
         </div>
         <p id="taskStatus" class="status muted" role="status" aria-live="polite"></p>
         <div id="dayView"></div>
