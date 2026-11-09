@@ -51,6 +51,7 @@ def test_upgrade_creates_inbox_items_in_empty_database(tmp_path, monkeypatch):
             "processing_status",
             "created_at",
             "updated_at",
+            "external_id",
         }
         assert columns["updated_at"]["nullable"] is True
         assert {
@@ -93,6 +94,7 @@ def test_upgrade_creates_inbox_items_in_empty_database(tmp_path, monkeypatch):
             "recurrence",
             "importance",
             "effort_min",
+            "link",
         }
         assert {
             column["name"]
@@ -102,7 +104,7 @@ def test_upgrade_creates_inbox_items_in_empty_database(tmp_path, monkeypatch):
             revision = connection.scalar(
                 text("SELECT version_num FROM alembic_version")
             )
-        assert revision == "0008_create_task_progress"
+        assert revision == "0011_allow_multiple_tasks_per_item"
     finally:
         engine.dispose()
 
@@ -202,7 +204,7 @@ def test_upgrade_adopts_legacy_database_without_changing_notes(
             for note_id, note_text, created_at in existing_notes
         ]
         assert next_id == 10
-        assert revision == "0008_create_task_progress"
+        assert revision == "0011_allow_multiple_tasks_per_item"
     finally:
         engine.dispose()
 
@@ -288,30 +290,49 @@ def test_upgrade_consolidates_tasks_that_share_a_source(tmp_path, monkeypatch):
             )
         ]
         assert [tuple(link) for link in links] == [(1, 1)]
-        assert revision == "0008_create_task_progress"
+        assert revision == "0011_allow_multiple_tasks_per_item"
 
+        # After 0011, one item may be the source of SEVERAL tasks (a note that
+        # yields multiple to-dos), so a second link for item 1 now succeeds.
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO tasks (
+                        id, text, priority, status, dedup_key,
+                        created_at, updated_at
+                    )
+                    VALUES (
+                        2, 'Another task', 'Medium', 'open',
+                        'another-key', '2026-01-05', '2026-01-05'
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO task_source_items (task_id, item_id)
+                    VALUES (2, 1)
+                    """
+                )
+            )
+        with engine.connect() as connection:
+            item1_tasks = connection.execute(
+                text(
+                    "SELECT task_id FROM task_source_items "
+                    "WHERE item_id = 1 ORDER BY task_id"
+                )
+            ).scalars().all()
+        assert item1_tasks == [1, 2]
+
+        # The composite PK still blocks an exact duplicate (task, item) pair.
         with pytest.raises(IntegrityError):
             with engine.begin() as connection:
                 connection.execute(
                     text(
-                        """
-                        INSERT INTO tasks (
-                            id, text, priority, status, dedup_key,
-                            created_at, updated_at
-                        )
-                        VALUES (
-                            2, 'Another task', 'Medium', 'open',
-                            'another-key', '2026-01-05', '2026-01-05'
-                        )
-                        """
-                    )
-                )
-                connection.execute(
-                    text(
-                        """
-                        INSERT INTO task_source_items (task_id, item_id)
-                        VALUES (2, 1)
-                        """
+                        "INSERT INTO task_source_items (task_id, item_id) "
+                        "VALUES (2, 1)"
                     )
                 )
     finally:

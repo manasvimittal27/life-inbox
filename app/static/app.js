@@ -67,12 +67,6 @@ function syncControlsFromUrl() {
     }
     element.value = value;
   }
-
-  const taskStatus = params.get('task_status');
-  document.getElementById('taskStatusFilter').value =
-    ['open', 'completed', 'dismissed'].includes(taskStatus)
-      ? taskStatus
-      : 'open';
 }
 
 function populateCategoryFilter(data) {
@@ -126,16 +120,6 @@ function clearItemFilters() {
   loadNotes();
 }
 
-function changeTaskStatusFilter() {
-  const status = document.getElementById('taskStatusFilter').value;
-  updateUrl({task_status: status});
-  loadTasks();
-}
-
-function changeTaskView() {
-  renderTaskView();
-}
-
 async function fetchJson(url, options, friendlyError) {
   let response;
   try {
@@ -159,6 +143,103 @@ async function fetchJson(url, options, friendlyError) {
   }
 }
 
+// --- Voice capture (browser Web Speech API) ---------------------------------
+
+let recognition = null;
+let isListening = false;
+// True once speech has filled the box, so organize can de-garble the transcript.
+// Cleared the moment the user types (they've reviewed/edited it themselves).
+let voiceUsed = false;
+
+function setMicState(listening) {
+  const btn = document.getElementById('micButton');
+  if (!btn) return;
+  btn.textContent = listening ? '⏹ Stop' : '🎤 Speak';
+  btn.classList.toggle('listening', listening);
+  btn.setAttribute('aria-pressed', String(listening));
+}
+
+function toggleVoiceCapture() {
+  const SpeechRecognition =
+    window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    setStatus(
+      'noteStatus',
+      'Voice input is not supported in this browser. Try Chrome or Safari.',
+      true
+    );
+    return;
+  }
+  if (isListening) {
+    stopVoiceCapture();
+    return;
+  }
+
+  recognition = new SpeechRecognition();
+  recognition.lang = 'en-IN';
+  recognition.interimResults = true;
+  recognition.continuous = true;
+
+  const textarea = document.getElementById('noteText');
+  // Keep whatever was already typed; append spoken words after it.
+  const baseText = textarea.value ? textarea.value.replace(/\s*$/, '') + ' ' : '';
+  let finalText = '';
+
+  recognition.onresult = (event) => {
+    let interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      const transcript = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        finalText += transcript + ' ';
+        voiceUsed = true;  // spoken text present → clean it up before parsing
+      } else {
+        interim += transcript;
+      }
+    }
+    textarea.value = baseText + finalText + interim;
+  };
+
+  recognition.onerror = (event) => {
+    if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+      setStatus(
+        'noteStatus',
+        'Microphone access was blocked. Allow the mic for this site and try again.',
+        true
+      );
+    } else if (event.error !== 'aborted' && event.error !== 'no-speech') {
+      setStatus('noteStatus', `Voice error: ${event.error}.`, true);
+    }
+  };
+
+  recognition.onend = () => {
+    isListening = false;
+    setMicState(false);
+  };
+
+  try {
+    recognition.start();
+    isListening = true;
+    setMicState(true);
+    setStatus('noteStatus', 'Listening… speak now, then press Stop.');
+  } catch (err) {
+    setStatus('noteStatus', 'Could not start voice input. Try again.', true);
+  }
+}
+
+function stopVoiceCapture() {
+  if (recognition) {
+    try {
+      recognition.stop();
+    } catch (err) { /* ignore */ }
+  }
+  isListening = false;
+  setMicState(false);
+  setStatus(
+    'noteStatus',
+    'Captured your words. Edit if needed, then “Add Note” — or keep talking.'
+  );
+}
+
 async function addNote() {
   if (isSavingNote) return;
 
@@ -171,11 +252,12 @@ async function addNote() {
   }
 
   isSavingNote = true;
-  setButtonBusy('addNoteButton', true, 'Saving…', 'Add Note');
+  setButtonBusy('addNoteButton', true, 'Saving…', 'Add & organize');
   setStatus('noteStatus', 'Saving your note…');
 
+  let savedItem = null;
   try {
-    await fetchJson(
+    savedItem = await fetchJson(
       '/api/items',
       {
         method: 'POST',
@@ -192,6 +274,7 @@ async function addNote() {
     await loadNotes(
       'Your note was saved, but the list could not refresh. Reload to try again.'
     );
+    return savedItem;
   } catch {
     setStatus(
       'noteStatus',
@@ -200,7 +283,7 @@ async function addNote() {
     );
   } finally {
     isSavingNote = false;
-    setButtonBusy('addNoteButton', false, 'Saving…', 'Add Note');
+    setButtonBusy('addNoteButton', false, 'Saving…', 'Add & organize');
   }
 }
 
@@ -539,16 +622,17 @@ async function transitionTask(taskId, action, actions) {
 }
 
 async function loadTasks() {
-  const filter = document.getElementById('taskStatusFilter').value;
   try {
     const tasks = await fetchJson(
-      `/api/tasks?status=${encodeURIComponent(filter)}`,
+      '/api/tasks?status=all',
       undefined,
       'Unable to load tasks.'
     );
     lastTasks = tasks;
-    renderTaskView();
+    updateEmptyState();
+    renderDay();
     renderTimePie();
+    renderWeekSummary();
     return true;
   } catch {
     setStatus(
@@ -560,37 +644,232 @@ async function loadTasks() {
   }
 }
 
-function renderTaskView() {
-  const mode = document.getElementById('taskViewMode').value;
-  const weekRoot = document.getElementById('weekView');
-  const listRoot = document.getElementById('tasks');
-  if (mode === 'week') {
-    listRoot.style.display = 'none';
-    weekRoot.style.display = '';
-    renderWeek(lastTasks);
-  } else {
-    weekRoot.style.display = 'none';
-    weekRoot.innerHTML = '';
-    listRoot.style.display = '';
-    renderList(lastTasks);
-  }
-}
+// --- Day view ----------------------------------------------------------------
 
-function renderList(tasks) {
-  const root = document.getElementById('tasks');
-  root.innerHTML = '';
-  if (!tasks.length) {
-    root.innerHTML = '<div class="panel muted">No tasks in this view.</div>';
-    return;
-  }
-  for (const task of tasks) {
-    root.appendChild(renderTask(task));
-  }
+// First-run: when there's nothing yet, show only the centered capture bar.
+function updateEmptyState() {
+  document.body.classList.toggle('empty-state', lastTasks.length === 0);
 }
-
-// --- Week view ---------------------------------------------------------------
 
 const BUCKET_ORDER = {P0: 0, P1: 1, P2: 2};
+const BUCKET_LABELS = {
+  P0: 'P0 · Urgent',
+  P1: 'P1 · Important',
+  P2: 'P2 · Operational'
+};
+
+let selectedDate = new Date();
+selectedDate.setHours(0, 0, 0, 0);
+
+function changeDay(delta) {
+  selectedDate = new Date(selectedDate);
+  selectedDate.setDate(selectedDate.getDate() + delta);
+  selectedDate.setHours(0, 0, 0, 0);
+  updateDayLabel();
+  renderDay();
+  renderTimePie();
+}
+
+function updateDayLabel() {
+  const label = document.getElementById('dayLabel');
+  if (!label) return;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((selectedDate - today) / 86400000);
+  let prefix = selectedDate.toLocaleDateString(undefined, {weekday: 'long'});
+  if (diffDays === 0) prefix = 'Today';
+  else if (diffDays === 1) prefix = 'Tomorrow';
+  else if (diffDays === -1) prefix = 'Yesterday';
+  const dateStr = selectedDate.toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'short'
+  });
+  label.textContent = `${prefix} · ${dateStr}`;
+}
+
+// Tasks that belong on a given day: recurring every day, one-offs on their due
+// date, plus (for today only) open past-due tasks carried forward.
+function dayTasksFor(dateIso) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayIso = localIso(today);
+  const out = [];
+  for (const t of lastTasks) {
+    if (t.status === 'dismissed') continue;
+    if (t.task_type === 'recurring') {
+      // A recurring task runs from the day it was created until its deadline.
+      // No deadline = an open-ended habit that repeats forever. With a deadline
+      // (e.g. an exam/submission), it's PREP that runs up to the day BEFORE the
+      // deadline; on the deadline day itself it becomes the event (the exam /
+      // submission), not another study day; past the deadline it disappears.
+      const startIso = t.created_at ? localIso(new Date(t.created_at)) : null;
+      const afterStart = !startIso || dateIso >= startIso;
+      if (!afterStart) continue;
+      if (!t.due_date) {
+        out.push(t);                                   // open-ended habit
+      } else if (dateIso < t.due_date) {
+        out.push(t);                                   // a prep day
+      } else if (dateIso === t.due_date) {
+        out.push({...t, _deadlineEvent: true});        // the deadline itself
+      }
+      // after due_date: it's over, show nothing
+    } else if (t.due_date === dateIso) {
+      out.push(t);
+    } else if (dateIso === todayIso && t.status === 'open' && !t.due_date) {
+      // Undated tasks surface on today so new thoughts show up immediately.
+      out.push({...t, _anytime: true});
+    } else if (
+      dateIso === todayIso
+      && t.status === 'open'
+      && t.due_date
+      && t.due_date < todayIso
+    ) {
+      out.push({...t, _overdue: true});
+    }
+  }
+  return out.sort(compareTasks);
+}
+
+function renderDay() {
+  const root = document.getElementById('dayView');
+  if (!root) return;
+  const dateIso = localIso(selectedDate);
+  const tasks = dayTasksFor(dateIso);
+
+  if (!tasks.length) {
+    root.innerHTML = '<div class="panel muted">Nothing scheduled for this day. '
+      + 'Enter a thought above and I’ll sort it in.</div>';
+    return;
+  }
+
+  const sections = ['P0', 'P1', 'P2'].map(bucket => {
+    const inBucket = tasks.filter(t => (t.bucket || 'P2') === bucket);
+    if (!inBucket.length) return '';
+    return `
+      <div class="bucket-section bucket-${bucket}">
+        <h3 class="bucket-head">${esc(BUCKET_LABELS[bucket])} <span class="muted">(${inBucket.length})</span></h3>
+        ${inBucket.map(renderDayTaskHtml).join('')}
+      </div>
+    `;
+  }).join('');
+
+  root.innerHTML = sections;
+}
+
+function linkifyText(text) {
+  const urlRe = /(https?:\/\/[^\s]+)/g;
+  let out = '';
+  let last = 0;
+  let match;
+  while ((match = urlRe.exec(text)) !== null) {
+    out += esc(text.slice(last, match.index));
+    const url = match[0].replace(/[).,]+$/, '');
+    out += `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`;
+    last = match.index + match[0].length;
+  }
+  out += esc(text.slice(last));
+  return out;
+}
+
+function meetingJoinHtml(task) {
+  const url = task.link
+    || (task.text.match(/https?:\/\/[^\s]+/) || [])[0];
+  if (!url) return '';
+  const clean = url.replace(/[).,]+$/, '');
+  let label = '🔗 Join';
+  if (/zoom\.us/i.test(clean)) label = '🎥 Join Zoom';
+  else if (/meet\.google/i.test(clean)) label = '🎥 Join Meet';
+  else if (/teams\.microsoft/i.test(clean)) label = '🎥 Join Teams';
+  return `<a class="join-link" href="${esc(clean)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+}
+
+function deadlineEventTitle(text) {
+  // "Study for Tarun's submission" -> "Tarun's submission"; the deadline day
+  // shows the deliverable itself, not the prep. Falls back to the full text.
+  const t = (text || '').trim();
+  const m = t.match(
+    /^(?:study(?:ing)?|prepare|preparing|prep|revise|revising|practice|practise|work|working)\s+(?:for\s+|on\s+)?(.+)$/i
+  );
+  if (m && m[1] && m[1].trim()) {
+    const s = m[1].trim();
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+  return t;
+}
+
+function renderDayTaskHtml(task) {
+  if (task._deadlineEvent) {
+    // The deadline day: the recurring prep task becomes the event itself.
+    const title = deadlineEventTitle(task.text);
+    const star = task.importance === 'high' ? ' <span class="star">★</span>' : '';
+    const effort = task.effort_min ? `<span class="task-effort">${task.effort_min}m</span>` : '';
+    return `<div class="task-row task-event" data-task-id="${task.id}">
+      <div class="task-row-main">
+        <span class="task-row-text">${esc(title)}${star} <span class="event-tag">due today</span></span>
+      </div>
+      <div class="task-row-meta"><span class="task-sched">📌 ${esc(formatDueDate(task.due_date))}</span>${effort}</div>
+      ${taskHoverActionsHtml(task.id)}
+    </div>`;
+  }
+  const doneClass = task.status === 'completed' ? ' task-row-done' : '';
+  const sched = task.task_type === 'recurring'
+    ? `🔁 ${task.recurrence || 'recurring'}`
+    : scheduleLabel(task);
+  const schedText = sched ? `<span class="task-sched">${esc(sched)}</span>` : '';
+  const effort = task.effort_min ? `<span class="task-effort">${task.effort_min}m</span>` : '';
+  const star = task.importance === 'high' ? ' <span class="star">★</span>' : '';
+  const overdue = task._overdue ? ' <span class="overdue">overdue</span>' : '';
+  const anytime = task._anytime ? ' <span class="anytime">anytime</span>' : '';
+  const join = meetingJoinHtml(task);
+  const progress = task.progress_pct ? progressBarHtml(task.progress_pct) : '';
+  return `<div class="task-row${doneClass}" data-task-id="${task.id}">
+    <div class="task-row-main">
+      <span class="task-row-text">${linkifyText(task.text)}${star}${overdue}${anytime}</span>
+      ${join}
+    </div>
+    <div class="task-row-meta">${schedText}${effort}${progress}</div>
+    ${taskHoverActionsHtml(task.id)}
+  </div>`;
+}
+
+function renderWeekSummary() {
+  const root = document.getElementById('weekSummary');
+  if (!root) return;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const weekAgo = new Date(today);
+  weekAgo.setDate(today.getDate() - 7);
+  const weekAgoIso = localIso(weekAgo);
+  const todayIso = localIso(today);
+
+  const completed = lastTasks.filter(t =>
+    t.status === 'completed'
+    && (t.updated_at || '').slice(0, 10) >= weekAgoIso
+  );
+  const missed = lastTasks.filter(t =>
+    t.status === 'open'
+    && t.task_type !== 'recurring'
+    && t.due_date
+    && t.due_date >= weekAgoIso
+    && t.due_date < todayIso
+  );
+
+  const listOf = (items) => items.length
+    ? `<ul class="summary-list">${items.slice(0, 6).map(t =>
+        `<li>${esc(t.text)}</li>`).join('')}</ul>`
+    : '<p class="muted small">None</p>';
+
+  root.innerHTML = `
+    <div class="summary-block">
+      <p class="summary-count done">✓ Completed (${completed.length})</p>
+      ${listOf(completed)}
+    </div>
+    <div class="summary-block">
+      <p class="summary-count miss">✗ Missed (${missed.length})</p>
+      ${listOf(missed)}
+    </div>
+  `;
+}
 
 function startOfWeek(d) {
   const day = d.getDay();            // 0 Sun .. 6 Sat
@@ -618,119 +897,12 @@ function compareTasks(a, b) {
   return a.id - b.id;
 }
 
-function weekTaskHtml(task, showDate) {
-  let sched = '';
-  if (showDate) {
-    sched = scheduleLabel(task);
-  } else if (task.task_type === 'recurring') {
-    sched = `🔁 ${task.recurrence || 'recurring'}`;
-  }
-  const schedText = sched ? ` · ${esc(sched)}` : '';
-  const effort = task.effort_min ? ` · ${task.effort_min}m` : '';
-  const doneClass = task.status === 'completed' ? ' week-task-done' : '';
-  const progress = task.progress_pct ? progressBarHtml(task.progress_pct) : '';
-  const overdue = task._overdue
-    ? ` <span class="overdue">overdue</span>`
-    : '';
-  return `<div class="week-task${doneClass}">${bucketPillHtml(task)}` +
-    `<span class="week-task-text">${esc(task.text)}</span>${overdue}` +
-    `<span class="week-task-meta">${schedText}${effort}</span>` +
-    taskHoverActionsHtml(task.id) +
-    progress +
-    `</div>`;
-}
-
 function taskHoverActionsHtml(taskId) {
   return `<span class="task-hover-actions">` +
     `<button type="button" title="Edit" aria-label="Edit task" onclick="openTaskModal(${taskId})">✎</button>` +
     `<button type="button" title="Complete" aria-label="Complete task" onclick="completeTask(${taskId})">✓</button>` +
     `<button type="button" title="Delete" aria-label="Delete task" onclick="deleteTask(${taskId})">🗑</button>` +
     `</span>`;
-}
-
-function renderWeek(tasks) {
-  const root = document.getElementById('weekView');
-
-  if (!tasks.length) {
-    root.innerHTML = '<div class="panel muted">No tasks in this view.</div>';
-    return;
-  }
-
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const todayIso = localIso(today);
-  const monday = startOfWeek(today);
-  const days = [];
-  for (let i = 0; i < 7; i += 1) {
-    const d = new Date(monday);
-    d.setDate(monday.getDate() + i);
-    days.push(d);
-  }
-  const weekIsos = days.map(localIso);
-
-  const recurring = tasks.filter(t => t.task_type === 'recurring');
-
-  // Assign each one-off task to a day column, carry open past-due ones onto
-  // today, and send the rest (undated / out-of-week) to the backlog.
-  const byDay = {};
-  weekIsos.forEach(iso => { byDay[iso] = []; });
-  const backlog = [];
-  for (const t of tasks) {
-    if (t.task_type === 'recurring') continue;
-    if (!t.due_date) { backlog.push(t); continue; }
-    if (t.status === 'open' && t.due_date < todayIso) {
-      byDay[todayIso].push({...t, _overdue: true});  // carry forward
-      continue;
-    }
-    if (weekIsos.includes(t.due_date)) { byDay[t.due_date].push(t); continue; }
-    backlog.push(t);
-  }
-
-  const dayCards = days.map((d, idx) => {
-    const iso = weekIsos[idx];
-    const dayTasks = [
-      ...recurring,
-      ...byDay[iso]
-    ].sort(compareTasks);
-
-    const label = d.toLocaleDateString(undefined, {weekday: 'short'});
-    const dateLabel = d.toLocaleDateString(undefined, {
-      day: 'numeric',
-      month: 'short'
-    });
-    const isToday = iso === todayIso;
-    const body = dayTasks.length
-      ? dayTasks.map(t => weekTaskHtml(t, false)).join('')
-      : '<div class="muted week-empty">—</div>';
-
-    return `
-      <div class="day-card${isToday ? ' day-today' : ''}">
-        <div class="day-head">
-          <span class="day-name">${esc(label)}</span>
-          <span class="day-date">${esc(dateLabel)}</span>
-        </div>
-        ${body}
-      </div>
-    `;
-  }).join('');
-
-  let backlogHtml = '';
-  if (backlog.length) {
-    const sorted = [...backlog].sort(compareTasks);
-    backlogHtml = `
-      <div class="panel backlog">
-        <h3>Backlog &amp; undated (${backlog.length})</h3>
-        ${sorted.map(t => {
-          const flagged = t.status === 'open'
-            && t.due_date
-            && t.due_date < todayIso;
-          return weekTaskHtml({...t, _overdue: flagged}, true);
-        }).join('')}
-      </div>
-    `;
-  }
-
-  root.innerHTML = `<div class="week-grid">${dayCards}</div>${backlogHtml}`;
 }
 
 // --- Today's time pie --------------------------------------------------------
@@ -743,20 +915,11 @@ function fmtMins(mins) {
   return `${m}m`;
 }
 
-function todayOccupancy(tasks) {
-  const todayIso = localIso(new Date());
+function selectedDayOccupancy() {
+  // Open tasks on the selected day, summed by bucket.
   const totals = {P0: 0, P1: 0, P2: 0};
-  for (const t of tasks) {
-    if (t.status !== 'open') continue;  // only open tasks occupy the day
-    let countsToday = false;
-    if (t.task_type === 'recurring') {
-      countsToday = true;
-    } else if (t.due_date === todayIso) {
-      countsToday = true;
-    } else if (t.due_date && t.due_date < todayIso) {
-      countsToday = true;  // overdue, carried onto today
-    }
-    if (!countsToday) continue;
+  for (const t of dayTasksFor(localIso(selectedDate))) {
+    if (t.status !== 'open') continue;
     const bucket = t.bucket || 'P2';
     totals[bucket] = (totals[bucket] || 0) + (t.effort_min || 0);
   }
@@ -785,7 +948,7 @@ function buildDonut(slices, ringTotal) {
   }
   return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" class="donut" aria-hidden="true">` +
     `<g transform="rotate(-90 ${cx} ${cy})">` +
-    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#eef2f7" stroke-width="${stroke}"></circle>` +
+    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#efece5" stroke-width="${stroke}"></circle>` +
     segs.join('') +
     `</g></svg>`;
 }
@@ -799,12 +962,11 @@ function renderTimePie() {
   } catch (e) { /* ignore */ }
 
   const budget = Math.round(budgetH * 60);
-  const totals = todayOccupancy(lastTasks);
+  const totals = selectedDayOccupancy();
   const occupied = totals.P0 + totals.P1 + totals.P2;
 
   if (occupied === 0) {
-    el.innerHTML = '<p class="muted">No time committed today. Add effort ' +
-      'estimates to today’s tasks to see your day fill up.</p>';
+    el.innerHTML = '<p class="muted small">No time committed for this day yet.</p>';
     return;
   }
 
@@ -812,10 +974,10 @@ function renderTimePie() {
   const over = Math.max(0, occupied - budget);
   const ring = Math.max(budget, occupied) || 1;
   const slices = [
-    {label: 'P0 urgent', value: totals.P0, color: '#b42318'},
-    {label: 'P1 deep work', value: totals.P1, color: '#9a6700'},
-    {label: 'P2 operational', value: totals.P2, color: '#0b5566'},
-    {label: 'Free', value: free, color: '#86c08f'}
+    {label: 'P0 urgent', value: totals.P0, color: '#a8432f'},
+    {label: 'P1 deep work', value: totals.P1, color: '#c08a3e'},
+    {label: 'P2 operational', value: totals.P2, color: '#3f6b78'},
+    {label: 'Free', value: free, color: '#b9cdb0'}
   ];
   const legend = slices
     .filter(s => s.value > 0)
@@ -999,117 +1161,140 @@ async function saveTaskEdit() {
   }
 }
 
-function renderAnalysis(data) {
-  const root = document.getElementById('aiOutput');
-  const generatedAt = data.generated_at
-    ? new Date(data.generated_at).toLocaleString()
-    : null;
-
-  const bucketHtml = (data.buckets || []).map(bucket => `
-    <div class="panel">
-      <h3>${esc(bucket.name)}</h3>
-      <ul>
-        ${(bucket.notes || []).map(n =>
-          `<li>${esc(n.title)} <span class="pill">${esc(n.priority)}</span></li>`
-        ).join('')}
-      </ul>
-    </div>
-  `).join('');
-
-  const todoHtml = (data.todos || []).map(t => {
-    const sched = scheduleLabel(t);
-    const schedText = sched ? ` · ${esc(sched)}` : '';
-    const effort = t.effort_min ? ` · ${t.effort_min}m` : '';
-    return `<li><strong>${esc(t.task)}</strong> ${bucketPillHtml(t)}${schedText}${effort}</li>`;
-  }).join('');
-
-  const pv = data.priority_view || {High: [], Medium: [], Low: []};
-  const priorityHtml = ['High', 'Medium', 'Low'].map(level => `
-    <div class="panel">
-      <h3>${level} priority (${(pv[level] || []).length})</h3>
-      <ul>
-        ${(pv[level] || []).map(n => `<li>${esc(n.title)}</li>`).join('') || '<li class="muted">None</li>'}
-      </ul>
-    </div>
-  `).join('');
-
-  root.innerHTML = `
-    ${generatedAt ? `<p class="muted"><strong>Generated:</strong> ${esc(generatedAt)}</p>` : ''}
-
-    <h3>Buckets</h3>
-    ${bucketHtml || '<p class="muted">No notes yet.</p>'}
-
-    <h3>ToDos</h3>
-    <ul>${todoHtml || '<li class="muted">No concrete ToDos detected.</li>'}</ul>
-
-    <h3>Priority view</h3>
-    ${priorityHtml}
-
-    <p class="muted">Mode: ${esc(data.mode || 'unknown')}</p>
-  `;
-}
-
-async function loadLatestAnalysis() {
-  try {
-    const data = await fetchJson(
-      '/api/analyze/latest',
-      undefined,
-      'Unable to load saved analysis.'
-    );
-    if (!data) return;
-
-    populateCategoryFilter(data);
-    renderAnalysis(data);
-    const generatedAt = new Date(data.generated_at).toLocaleString();
-    setStatus(
-      'analysisStatus',
-      `Showing saved analysis generated ${generatedAt}.`
-    );
-  } catch {
-    setStatus(
-      'analysisStatus',
-      'We could not load the saved analysis. You can try analyzing again.',
-      true
-    );
-  }
-}
-
 async function analyzeInbox() {
   if (isAnalyzingInbox) return;
-
   isAnalyzingInbox = true;
-  setButtonBusy(
-    'analyzeButton',
-    true,
-    'Analyzing…',
-    'Analyze Entire Inbox with AI'
-  );
-  setStatus('analysisStatus', 'Analyzing your saved notes…');
-
+  startAnalyzing();
   try {
-    const data = await fetchJson(
-      '/api/analyze',
-      {method: 'POST'},
-      'Unable to analyze inbox.'
-    );
-    populateCategoryFilter(data);
-    renderAnalysis(data);
+    await fetchJson('/api/analyze', {method: 'POST'}, 'Unable to analyze inbox.');
     await loadTasks();
-    setStatus('analysisStatus', 'Analysis complete.');
   } catch {
     setStatus(
-      'analysisStatus',
-      'We could not analyze your inbox. Your notes are still here—please try again.',
+      'noteStatus',
+      'We could not organize your inbox. Your notes are safe — please try again.',
       true
     );
   } finally {
     isAnalyzingInbox = false;
-    setButtonBusy(
-      'analyzeButton',
-      false,
-      'Analyzing…',
-      'Analyze Entire Inbox with AI'
-    );
+    stopAnalyzing();
+  }
+}
+
+// One-tap flow: save the thought, organize it, and show where it landed.
+let isCapturing = false;
+let lastCapture = {text: '', at: 0};
+
+async function captureAndOrganize() {
+  const text = document.getElementById('noteText').value.trim();
+  if (!text) {
+    setStatus('noteStatus', 'Enter a thought first — or press 🎤 Speak.', true);
+    return;
+  }
+  // Double-submit guard: ignore a second trigger while one is in flight, and
+  // swallow an identical note re-sent within 10s (rapid double-tap or voice+click).
+  if (isCapturing) return;
+  if (text === lastCapture.text && Date.now() - lastCapture.at < 10000) {
+    setStatus('noteStatus', 'Already added that one just now.');
+    document.getElementById('noteText').value = '';
+    return;
+  }
+  isCapturing = true;
+  lastCapture = {text, at: Date.now()};
+  try {
+    await runCapture(text);
+  } finally {
+    isCapturing = false;
+  }
+}
+
+const ANALYZING_MESSAGES = [
+  'Reading your thoughts',
+  'Analyzing and prioritizing for you',
+  'Sorting into P0 · P1 · P2',
+  'Almost there',
+];
+let analyzingTimer = null;
+
+function startAnalyzing() {
+  const panel = document.getElementById('thinking');
+  const msg = document.getElementById('analyzingMsg');
+  if (!panel) return;
+  panel.hidden = false;
+  if (!msg) return;
+  let i = 0;
+  msg.classList.remove('fade');
+  msg.textContent = ANALYZING_MESSAGES[0];
+  clearInterval(analyzingTimer);
+  analyzingTimer = setInterval(() => {
+    msg.classList.add('fade');               // fade out
+    setTimeout(() => {
+      i = (i + 1) % ANALYZING_MESSAGES.length;
+      msg.textContent = ANALYZING_MESSAGES[i];
+      msg.classList.remove('fade');          // fade back in
+    }, 250);
+  }, 1500);
+}
+
+function stopAnalyzing() {
+  clearInterval(analyzingTimer);
+  analyzingTimer = null;
+  const panel = document.getElementById('thinking');
+  if (panel) panel.hidden = true;
+}
+
+async function runCapture(text) {
+  // Capture whether this note came from speech BEFORE addNote clears state, so
+  // the organize step can de-garble a raw transcript.
+  const wasVoice = voiceUsed;
+  voiceUsed = false;
+  const item = await addNote();  // saves + clears the box, returns the item
+  if (!item || document.getElementById('noteText').value.trim()) return;
+
+  // Fast path: analyze ONLY this new note (not the whole inbox).
+  startAnalyzing();
+  let created = [];
+  try {
+    created = await fetchJson(
+      `/api/items/${item.id}/organize${wasVoice ? '?source=voice' : ''}`,
+      {method: 'POST'},
+      'Unable to organize this note.'
+    ) || [];
+    if (wasVoice) await loadNotes();  // show the cleaned-up note text
+    await loadTasks();
+  } catch {
+    setStatus('noteStatus', 'Saved, but could not organize it. Try again.', true);
+    return;
+  } finally {
+    stopAnalyzing();
+  }
+  if (!created.length) {
+    setStatus('noteStatus', 'Saved to your inbox.');
+    return;
+  }
+
+  const whenOf = (t) => {
+    if (t.task_type === 'recurring') return t.recurrence || 'recurring';
+    if (t.due_date) return formatDueDate(t.due_date);
+    return 'today';
+  };
+  const summary = created
+    .map(t => `${t.text} → ${t.bucket} · ${whenOf(t)}`)
+    .join('   ·   ');
+  setStatus('noteStatus', `Sorted: ${summary}`);
+
+  // If a new task isn't on the day you're viewing, jump so you actually see it.
+  const onView = dayTasksFor(localIso(selectedDate)).some(
+    d => created.some(c => c.id === d.id)
+  );
+  if (!onView) {
+    const dated = created.find(t => t.due_date);
+    if (dated) {
+      selectedDate = new Date(`${dated.due_date}T00:00:00`);
+      selectedDate.setHours(0, 0, 0, 0);
+      updateDayLabel();
+      renderDay();
+      renderTimePie();
+    }
   }
 }
 
@@ -1170,10 +1355,97 @@ function restoreDayBudget() {
   } catch (e) { /* ignore */ }
 }
 
+// --- Gmail inbound sync -----------------------------------------------------
+
+let gmailConnected = false;
+
+function setGmailButton(connected) {
+  gmailConnected = connected;
+  const btn = document.getElementById('gmailButton');
+  if (!btn) return;
+  btn.textContent = connected ? 'Sync Gmail' : 'Connect Gmail';
+  btn.title = connected
+    ? 'Pull recent emails and turn them into tasks'
+    : 'Connect your Gmail (read-only) to turn emails into tasks';
+}
+
+async function refreshGmailStatus() {
+  try {
+    const status = await fetchJson('/api/gmail/status', undefined, '');
+    setGmailButton(Boolean(status && status.connected));
+  } catch {
+    setGmailButton(false);
+  }
+}
+
+function gmailAction() {
+  if (gmailConnected) {
+    syncGmail();
+  } else {
+    // Hand off to Google's consent screen; the callback returns us to "/".
+    window.location.href = '/api/gmail/auth';
+  }
+}
+
+async function syncGmail() {
+  setButtonBusy('gmailButton', true, 'Syncing…', 'Sync Gmail');
+  setStatus('noteStatus', 'Checking your inbox…');
+  try {
+    const result = await fetchJson(
+      '/api/gmail/sync',
+      {method: 'POST'},
+      'Unable to sync Gmail.'
+    );
+    const created = (result && result.created_tasks) || [];
+    const newEmails = (result && result.new_emails) || 0;
+    if (!newEmails) {
+      setStatus('noteStatus', 'No new emails to turn into tasks.');
+    } else {
+      const n = created.length;
+      setStatus(
+        'noteStatus',
+        `Pulled ${newEmails} new email${newEmails === 1 ? '' : 's'} → ` +
+        `${n} actionable${n === 1 ? '' : 's'} added.`
+      );
+    }
+    await loadNotes();
+    await loadTasks();
+  } catch {
+    setStatus('noteStatus', 'Could not sync Gmail. Please try again.', true);
+  } finally {
+    setButtonBusy('gmailButton', false, 'Syncing…', 'Sync Gmail');
+  }
+}
+
+function handleGmailReturn() {
+  const params = new URLSearchParams(window.location.search);
+  const flag = params.get('gmail');
+  if (!flag) return;
+  if (flag === 'connected') {
+    setStatus('noteStatus', 'Gmail connected. Click “Sync Gmail” to pull your emails.');
+  } else if (flag === 'error') {
+    setStatus('noteStatus', 'Gmail connection was cancelled or failed.', true);
+  }
+  // Clean the flag out of the URL so a refresh doesn't repeat the message.
+  params.delete('gmail');
+  const qs = params.toString();
+  window.history.replaceState(
+    {}, '', window.location.pathname + (qs ? `?${qs}` : '')
+  );
+}
+
+// Manual typing means the user reviewed/edited the text themselves, so don't
+// treat it as a raw transcript. (Speech sets textarea.value programmatically,
+// which does NOT fire 'input', so this only resets on real keystrokes.)
+document.getElementById('noteText')
+  ?.addEventListener('input', () => { voiceUsed = false; });
+
 syncControlsFromUrl();
 restoreDayBudget();
+handleGmailReturn();
+refreshGmailStatus();
+updateDayLabel();
 loadNotes();
-loadLatestAnalysis();
 loadTasks();
 
 window.addEventListener('popstate', () => {

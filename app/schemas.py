@@ -105,6 +105,7 @@ class AnalysisTodo(StrictAnalysisModel):
     recurrence: Optional[str] = None
     importance: Importance = "normal"
     effort_min: Optional[int] = Field(default=None, ge=0)
+    link: Optional[str] = None
 
 
 class AnalysisPriorityItem(StrictAnalysisModel):
@@ -191,6 +192,7 @@ class Task(BaseModel):
     recurrence: Optional[str] = None
     importance: Importance = "normal"
     effort_min: Optional[int] = None
+    link: Optional[str] = None
     progress_pct: int = 0
     progress_note: Optional[str] = None
     progress_date: Optional[str] = None
@@ -234,6 +236,7 @@ class TaskUpdate(BaseModel):
     recurrence: Optional[str] = None
     importance: Optional[Importance] = None
     effort_min: Optional[int] = Field(default=None, ge=0)
+    link: Optional[str] = None
 
     @field_validator("due_date")
     @classmethod

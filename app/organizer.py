@@ -1,14 +1,39 @@
 import json
 import logging
 import os
+import re
 from datetime import date, timedelta
 from typing import Optional
+
+
+URL_RE = re.compile(r"https?://[^\s]+")
+
+
+def extract_url(text: str) -> Optional[str]:
+    match = URL_RE.search(text or "")
+    return match.group(0).rstrip(").,") if match else None
 
 from app.schemas import AnalysisResult
 
 
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# The single-note parser needs stronger reading comprehension (coreference,
+# segmenting run-on speech, self-corrections) than the bulk/progress calls, so
+# it gets its own, more capable model. Still a fast tier — worth ~1s.
+PARSE_MODEL = os.getenv("OPENAI_PARSE_MODEL", "gpt-4o")
 logger = logging.getLogger(__name__)
+
+
+def _kwargs_for(model: str) -> dict:
+    """Reasoning effort only applies to GPT-5 reasoning models; keep it off the
+    fast non-reasoning models (gpt-4o / gpt-4o-mini etc.)."""
+    if model.startswith("gpt-5"):
+        return {"reasoning": {"effort": "minimal"}}
+    return {}
+
+
+def _model_kwargs() -> dict:
+    return _kwargs_for(MODEL)
 
 
 def extract_json_object(raw: str) -> dict:
@@ -91,20 +116,74 @@ def _next_weekday(today: date, target_idx: int) -> date:
     return today + timedelta(days=days_ahead)
 
 
+def _nth_of_month(today: date, n: int) -> Optional[date]:
+    """The Nth of the current month, rolled forward to next month (or next year)
+    if that day has already passed or doesn't exist this month."""
+    if not 1 <= n <= 31:
+        return None
+    year, month = today.year, today.month
+    for _ in range(13):  # try this month, then roll forward until a valid future day
+        try:
+            candidate = date(year, month, n)
+        except ValueError:
+            candidate = None
+        if candidate is not None and candidate >= today:
+            return candidate
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    return None
+
+
+_NUM_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+
+
 def _resolve_date(lowered: str, today: date) -> Optional[str]:
     if "day after tomorrow" in lowered:
         return (today + timedelta(days=2)).isoformat()
+    # "in 2 days" / "2 days later" / "three days from now" → today + N.
+    offset = re.search(
+        r"\b(?:in\s+)?(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)"
+        r"\s+days?\s+(?:later|from now|from today|ahead)\b",
+        lowered,
+    ) or re.search(
+        r"\bin\s+(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+days?\b",
+        lowered,
+    )
+    if offset:
+        token = offset.group(1)
+        n = int(token) if token.isdigit() else _NUM_WORDS.get(token)
+        if n:
+            return (today + timedelta(days=n)).isoformat()
     if "tomorrow" in lowered:
         return (today + timedelta(days=1)).isoformat()
     if "today" in lowered or "tonight" in lowered:
         return today.isoformat()
+    if "next weekend" in lowered:
+        return (_next_weekday(today, 5) + timedelta(days=7)).isoformat()
     if "weekend" in lowered:
         return _next_weekday(today, 5).isoformat()  # coming Saturday
     if "next week" in lowered:
         return (today + timedelta(days=7)).isoformat()
+    if "this week" in lowered:
+        return _next_weekday(today, 4).isoformat()  # coming Friday
     for name, idx in WEEKDAYS.items():
         if name in lowered:
             return _next_weekday(today, idx).isoformat()
+    # "the 15th" / "on the 3rd" / "before the 20th" → that day, rolled forward.
+    nth = re.search(r"\b(?:the|on|by|before|due)\s+(\d{1,2})(?:st|nd|rd|th)\b", lowered)
+    if not nth:
+        nth = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)\b", lowered)
+    if nth:
+        resolved = _nth_of_month(today, int(nth.group(1)))
+        if resolved is not None:
+            return resolved.isoformat()
+    # A bare clock time ("9pm", "21:00") with no day means today.
+    if re.search(r"\b\d{1,2}\s*(?:am|pm)\b", lowered) or re.search(r"\b\d{1,2}:\d{2}\b", lowered):
+        return today.isoformat()
     return None
 
 
@@ -194,6 +273,7 @@ def fallback_analyze(notes: list[dict], today: Optional[date] = None) -> dict:
                 "recurrence": schedule["recurrence"],
                 "importance": importance_for_text(text),
                 "effort_min": effort_for_text(text, schedule),
+                "link": extract_url(text),
             })
 
     return {
@@ -240,7 +320,11 @@ def estimate_progress(task_text: str, note: str) -> int:
             f"Progress note: {note}\n"
             "Reply with ONLY the number."
         )
-        response = client.responses.create(model=MODEL, input=prompt)
+        response = client.responses.create(
+            model=MODEL,
+            input=prompt,
+            **_model_kwargs(),
+        )
         match = re.search(r"\d{1,3}", response.output_text or "")
         if match:
             return max(0, min(100, int(match.group())))
@@ -295,8 +379,174 @@ def extract_content_from_file(data: bytes, mime: str, filename: str) -> str:
                 ],
             }
         ],
+        **_model_kwargs(),
     )
     return (response.output_text or "").strip()
+
+
+def _fallback_single_note(text: str, today: date) -> list[dict]:
+    """Deterministic single-note todos (no API key)."""
+    schedule = resolve_schedule(text, today)
+    return [{
+        "task": text.strip(),
+        "bucket": bucket_for_todo(text, schedule, today),
+        "due_date": schedule["due_date"],
+        "task_type": schedule["task_type"],
+        "recurrence": schedule["recurrence"],
+        "importance": importance_for_text(text),
+        "effort_min": effort_for_text(text, schedule),
+        "link": extract_url(text),
+    }]
+
+
+def clean_transcript(text: str) -> str:
+    """De-garble a raw speech-to-text transcript before it is parsed.
+
+    Voice capture (Web Speech API) often mangles dictation — mis-hearings,
+    repeated/filler words, false starts (e.g. "today's letter 2 days later
+    today's later yeah that's it"). This runs ONE light LLM pass to fix obvious
+    transcription errors and drop filler, while preserving every real task,
+    date, time, name and number. It deliberately does NOT resolve relative dates
+    (keeps "tomorrow"/"2 days later" verbatim) — that's analyze_single_note's
+    job. No API key, an error, or empty input → the original text unchanged.
+    """
+    text = (text or "").strip()
+    if not text or not os.getenv("OPENAI_API_KEY"):
+        return text
+    try:
+        from openai import OpenAI
+        client = OpenAI()
+        prompt = f"""You clean raw speech-to-text transcripts before they are parsed into tasks.
+The text was dictated and may contain mis-hearings, repeated or filler words, and
+garbled fragments (e.g. "today's letter 2 days later today's later yeah that's it").
+
+Your ONLY job is to remove noise and fix mis-hearings — never to drop real content.
+
+CRITICAL — time and date phrases are the most important words to keep:
+- NEVER delete a time/date expression: "tomorrow", "tonight", "today", "2 days
+  later", "in 3 days", "next Friday", "this weekend", "the 12th", "6 p.m.", "4:30".
+- They are often buried inside garble. "today's letter 2 days later today's later"
+  is garble wrapped around the real phrase "2 days later" — KEEP "2 days later"
+  and attach it to the task it belongs to; drop only the surrounding noise.
+- Do NOT resolve or convert dates — keep them worded exactly as spoken.
+
+Also:
+- PRESERVE every real task, person's name, and number as intended.
+- Remove only clear filler and false starts ("um", "yeah that's it", repeated words).
+- Do NOT add information or invent tasks. When unsure whether a word is noise or
+  meaning, KEEP it. If the text is already clean, return it unchanged.
+
+Return ONLY the cleaned transcript text, nothing else.
+
+Transcript: {json.dumps(text)}
+"""
+        response = client.responses.create(
+            model=PARSE_MODEL,
+            input=prompt,
+            **_kwargs_for(PARSE_MODEL),
+        )
+        cleaned = (response.output_text or "").strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.replace("```", "").strip()
+        # Models sometimes echo the text wrapped in quotes — unwrap a single
+        # pair that spans the whole string.
+        if len(cleaned) >= 2 and cleaned[0] in "\"'" and cleaned[-1] == cleaned[0]:
+            cleaned = cleaned[1:-1].strip()
+        # Guard against a model that returns nothing or a refusal.
+        return cleaned or text
+    except Exception:
+        logger.exception("Transcript cleanup failed; using original text")
+        return text
+
+
+def analyze_single_note(text: str, today: Optional[date] = None) -> list[dict]:
+    """Fast path: turn ONE note into its structured to-do(s). Much faster than
+    re-analyzing the whole inbox."""
+    today = today or date.today()
+    if not os.getenv("OPENAI_API_KEY"):
+        return _fallback_single_note(text, today)
+
+    try:
+        from openai import OpenAI
+        client = OpenAI()
+        prompt = f"""
+Today is {today.strftime("%A")}, {today.isoformat()}.
+You turn ONE messy personal note (often rambling, spoken out loud, with
+self-corrections) into clean, SEPARATE actionable to-dos.
+
+Return ONLY a JSON array. Each element:
+{{
+  "task": "concrete action",
+  "bucket": "P0 | P1 | P2",
+  "due_date": "YYYY-MM-DD or null",
+  "task_type": "one_off | recurring",
+  "recurrence": "daily | weekly | null",
+  "importance": "high | normal",
+  "effort_min": 60,
+  "link": "meeting/call URL if present, else null"
+}}
+
+HOW TO SPLIT (most important). The placeholders below (<A>, <X>, <topic>) are
+ONLY illustrations of the rules — NEVER output them as tasks. Every task you
+return must come from the user's Note at the bottom, never from these instructions:
+- Every DISTINCT deliverable, exam, submission, assignment, challenge, event, or
+  errand is its OWN element. Never merge two of them into one task.
+- Different named things are different tasks even if mentioned in one breath:
+  "study for <A>, <B>, and <C>" → THREE separate study tasks, one per deliverable.
+- Resolve references defined later in the note. If it says "<X> is for <topic>",
+  that task is the <topic> one — label it so, e.g. "Study for <X> (<topic>)".
+- Honor self-corrections: if the note revises a fact ("sorry, <A> is on the 12th,
+  <B> on the 13th"), use the CORRECTED value and ignore the earlier one.
+
+TIMING (today's date is given above — compute from it):
+- Resolve ALL timing to a real ISO date. No date given → today. A bare time
+  ("9pm") or "tonight" → today. "next <weekday>"/"<weekday>" → the coming one.
+- "in N days" / "N days later" / "N days from now" → exactly N days from TODAY
+  (the date given above), e.g. "2 days later" = today + 2. Count from TODAY, NOT
+  from another task's date, UNLESS the note explicitly says "N days after <that
+  event>". "day after tomorrow" = today + 2.
+- "the Nth"/"on the 12th"/"before the Nth" → the Nth of the CURRENT month, BUT if
+  that day has already passed this month, use the Nth of NEXT month instead.
+- "this weekend"/"the weekend" → the coming Saturday. "next weekend" → the Saturday
+  after that. "this week" → the coming Friday.
+- NEVER output a due_date earlier than today. If your resolved date is in the past,
+  roll it forward (to next month, or next year for a month that already passed).
+- A deadline you must PREPARE for over several days ("I have the 9th, 10th, 11th
+  to prepare", "start studying from now", "study every day until") → make the
+  study task task_type "recurring", recurrence "daily", and set due_date to the
+  deadline/exam date. That way it shows up each prep day and stops at the deadline.
+- One-time events (a party, a call) are task_type "one_off" on their date.
+
+BUCKET (priority):
+- P0 = urgent deadlines AND anything academic or work-related: exams, submissions,
+  assignments, tests, deliverables, challenges, client/work tasks, medical appts.
+- P1 = important deep work with no hard deadline (general learning, brainstorming,
+  side projects).
+- P2 = operational errands and hobbies (laundry, shopping, parties, leisure).
+- importance "high" if it's academic/work/a deadline, or the note stresses it
+  ("crucial", "important").
+
+OTHER:
+- effort_min: studying/deep work ~60, quick errands ~15-30, short events ~30.
+
+Note: {json.dumps(text)}
+"""
+        response = client.responses.create(
+            model=PARSE_MODEL,
+            input=prompt,
+            **_kwargs_for(PARSE_MODEL),
+        )
+        raw = (response.output_text or "").strip()
+        if raw.startswith("```"):
+            raw = raw.replace("```json", "").replace("```", "").strip()
+        start, end = raw.find("["), raw.rfind("]")
+        if start == -1 or end == -1:
+            return _fallback_single_note(text, today)
+        todos = json.loads(raw[start:end + 1])
+        return todos if isinstance(todos, list) and todos else _fallback_single_note(text, today)
+    except Exception:
+        logger.exception("Single-note analysis failed; using fallback")
+        return _fallback_single_note(text, today)
 
 
 def validate_analysis_result(result: dict, notes: list[dict]) -> dict:
@@ -363,7 +613,8 @@ Return ONLY valid JSON in exactly this shape:
       "task_type": "one_off",
       "recurrence": "daily / weekly, or null",
       "importance": "high or normal",
-      "effort_min": 60
+      "effort_min": 60,
+      "link": "meeting/call URL if the note has one, else null"
     }}
   ],
   "priority_view": {{
@@ -394,7 +645,8 @@ Rules:
     set "task_type" to "recurring" and leave "due_date" null; treat "regularly"
     and "every day" as "recurrence": "daily" unless a weekly cadence is explicit.
     Otherwise "task_type" is "one_off" with a "due_date" (or null if truly no
-    timing is implied).
+    timing is implied). If a note gives only a clock time ("9pm", "21:00") or
+    "tonight" with no explicit day, treat it as today.
 12. Assign each ToDo a "bucket":
     - P0 = urgent: a hard deadline that is today or tomorrow, or explicit urgency.
     - P1 = important deep/analytical work (studying, coding, building, brainstorming,
@@ -405,6 +657,8 @@ Rules:
     "must", "critical"); this boosts ranking WITHIN a bucket and does NOT promote to P0.
 14. "effort_min" is an estimated duration in minutes; default learning/deep-work
     sessions to 60, quick operational tasks to ~15-30.
+15a. "link": if the note contains a meeting or call URL (Google Meet, Zoom,
+    Teams, a lecture/webinar link), copy that full URL into "link". Otherwise null.
 15. Keep titles and ToDos short and concrete. No motivational language, commentary, or prose outside the JSON.
 16. priority_view should include every note once, grouped by priority.
 
@@ -412,7 +666,11 @@ Saved notes:
 {json.dumps(compact_notes, ensure_ascii=False)}
 """
 
-        response = client.responses.create(model=MODEL, input=prompt)
+        response = client.responses.create(
+            model=MODEL,
+            input=prompt,
+            **_model_kwargs(),
+        )
         result = extract_json_object(response.output_text)
         result["mode"] = "openai"
         return validate_analysis_result(result, notes)

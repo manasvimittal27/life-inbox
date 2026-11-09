@@ -40,6 +40,7 @@ Base = declarative_base()
 TEXT_ITEM_TYPE = "text"
 IMAGE_ITEM_TYPE = "image"
 PDF_ITEM_TYPE = "pdf"
+EMAIL_ITEM_TYPE = "email"
 READY_STATUS = "ready"
 ANALYSIS_RUNNING = "running"
 ANALYSIS_SUCCEEDED = "succeeded"
@@ -64,6 +65,9 @@ class InboxItemRecord(Base):
     processing_status = Column(Text, nullable=False)
     created_at = Column(Text, nullable=False)
     updated_at = Column(Text, nullable=True)
+    # Stable id of an external source (e.g. a Gmail message id) so re-syncing
+    # the same source never creates a duplicate inbox item.
+    external_id = Column(Text, nullable=True)
 
 
 class AnalysisRunRecord(Base):
@@ -127,13 +131,15 @@ class TaskRecord(Base):
     recurrence = Column(Text, nullable=True)
     importance = Column(Text, nullable=False, server_default="normal")
     effort_min = Column(Integer, nullable=False, server_default="60")
+    link = Column(Text, nullable=True)
 
 
 class TaskSourceItemRecord(Base):
     __tablename__ = "task_source_items"
-    __table_args__ = (
-        UniqueConstraint("item_id", name="uq_task_source_items_item_id"),
-    )
+    # NOTE: historically item_id was UNIQUE (one task per source note). That is
+    # removed (migration 0011) so a single note/email can produce SEVERAL tasks,
+    # each linked to its source — the composite PK still prevents a duplicate
+    # (task, item) pair.
 
     task_id = Column(
         Integer,
@@ -215,6 +221,51 @@ def add_file_item_to_db(
         session.add(item)
         session.commit()
         return _item_to_dict(item)
+
+
+def add_email_item_to_db(
+    raw_text: str,
+    external_id: str,
+    title: Optional[str] = None,
+    source_url: Optional[str] = None,
+) -> dict:
+    """Persist one email as an inbox item.
+
+    ``external_id`` is the Gmail message id; ``source_url`` is the deep link back
+    to the message in Gmail.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with SessionLocal() as session:
+        item = InboxItemRecord(
+            item_type=EMAIL_ITEM_TYPE,
+            title=title,
+            raw_text=raw_text,
+            source_url=source_url,
+            external_id=external_id,
+            processing_status=READY_STATUS,
+            created_at=now,
+        )
+        session.add(item)
+        session.commit()
+        return _item_to_dict(item)
+
+
+def email_item_exists(external_id: str) -> bool:
+    """True if an email inbox item already exists for this Gmail message id."""
+    with SessionLocal() as session:
+        existing = session.scalar(
+            select(InboxItemRecord.id)
+            .where(InboxItemRecord.item_type == EMAIL_ITEM_TYPE)
+            .where(InboxItemRecord.external_id == external_id)
+            .limit(1)
+        )
+        return existing is not None
+
+
+def get_item_from_db(item_id: int) -> Optional[dict]:
+    with SessionLocal() as session:
+        item = session.get(InboxItemRecord, item_id)
+        return _item_to_dict(item) if item is not None else None
 
 
 def list_items_from_db(
@@ -535,6 +586,94 @@ def get_latest_successful_analysis() -> Optional[dict]:
 
 
 _PRIORITY_TO_BUCKET = {"High": "P0", "Medium": "P1", "Low": "P2"}
+_BUCKET_TO_PRIORITY = {"P0": "High", "P1": "Medium", "P2": "Low"}
+
+
+def create_tasks_for_item(item_id: int, todos: list[dict]) -> list[dict]:
+    """Fast per-note path: create (or refresh) the task(s) for one note's todos,
+    without re-touching the rest of the inbox."""
+    now = datetime.now(timezone.utc).isoformat()
+    with SessionLocal() as session:
+        if session.get(InboxItemRecord, item_id) is None:
+            raise ValueError(f"Item {item_id} not found")
+
+        existing = session.scalars(
+            select(TaskRecord)
+            .join(TaskSourceItemRecord)
+            .where(TaskSourceItemRecord.item_id == item_id)
+            .order_by(TaskRecord.id.asc())
+        ).all()
+
+        todos = todos or []
+        result_ids: list[int] = []
+        for idx, todo in enumerate(todos):
+            structured = _structured_task_fields(todo)
+            priority = _BUCKET_TO_PRIORITY.get(structured["bucket"], "Medium")
+            dedup = _item_task_dedup_key(item_id, idx, todo.get("task", ""))
+
+            if idx < len(existing):
+                # Refresh the note's existing task at this slot in place, so its
+                # status and logged progress survive a re-organize.
+                task = existing[idx]
+                task.text = todo.get("task", "").strip() or task.text
+                task.priority = priority
+                task.dedup_key = dedup
+                for key, value in structured.items():
+                    setattr(task, key, value)
+                task.updated_at = now
+                result_ids.append(task.id)
+                continue
+
+            task = TaskRecord(
+                text=todo.get("task", "").strip() or "Untitled",
+                priority=priority,
+                timing_text=None,
+                status=TASK_OPEN,
+                dedup_key=dedup,
+                created_at=now,
+                updated_at=now,
+                **structured,
+            )
+            session.add(task)
+            session.flush()
+            # Every task from this note links back to it, so deleting the note
+            # cleans up all of them and each task tracks its source.
+            session.add(
+                TaskSourceItemRecord(task_id=task.id, item_id=item_id)
+            )
+            result_ids.append(task.id)
+
+        # A re-organize that yields FEWER tasks than before removes the leftover
+        # ones (and their progress/links) so stale tasks don't pile up.
+        for task in existing[len(todos):]:
+            session.execute(
+                delete(TaskSourceItemRecord).where(
+                    TaskSourceItemRecord.task_id == task.id
+                )
+            )
+            session.execute(
+                delete(TaskProgressRecord).where(
+                    TaskProgressRecord.task_id == task.id
+                )
+            )
+            session.delete(task)
+
+        session.commit()
+        return [
+            _task_to_dict(session, session.get(TaskRecord, tid))
+            for tid in result_ids
+        ]
+
+
+def _item_task_dedup_key(item_id: int, idx: int, task_text: str) -> str:
+    """A stable, unique dedup key for the idx-th task of one note. The first
+    task keeps the source-item fingerprint (compatible with the bulk path); the
+    rest fold in their position so one note can own several distinct tasks."""
+    if idx == 0:
+        return _task_dedup_key([item_id])
+    return hashlib.sha256(
+        f"{item_id}:{idx}:{task_text}".encode("utf-8")
+    ).hexdigest()
 
 
 def _structured_task_fields(todo: dict) -> dict:
@@ -554,6 +693,7 @@ def _structured_task_fields(todo: dict) -> dict:
         "recurrence": todo.get("recurrence"),
         "importance": todo.get("importance") or "normal",
         "effort_min": todo.get("effort_min") or 60,
+        "link": todo.get("link"),
     }
 
 
@@ -598,6 +738,7 @@ def _task_to_dict(session, task: TaskRecord, today_iso: Optional[str] = None) ->
         "recurrence": task.recurrence,
         "importance": task.importance,
         "effort_min": task.effort_min,
+        "link": task.link,
         "progress_pct": progress.pct if progress else 0,
         "progress_note": progress.note if progress else None,
         "progress_date": progress.progress_date if progress else None,
@@ -663,6 +804,7 @@ _EDITABLE_TASK_FIELDS = {
     "recurrence",
     "importance",
     "effort_min",
+    "link",
 }
 
 

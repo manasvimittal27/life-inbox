@@ -1,11 +1,14 @@
 import logging
+import os
 from datetime import date
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile, status
-from fastapi.responses import HTMLResponse, Response
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+from app import gmail_sync
 
 from app.database import (
     IMAGE_ITEM_TYPE,
@@ -14,6 +17,8 @@ from app.database import (
     add_item_to_db,
     add_note_to_db,
     complete_analysis_run,
+    create_tasks_for_item,
+    get_item_from_db,
     delete_item_from_db,
     delete_note_from_db,
     delete_task_from_db,
@@ -33,6 +38,8 @@ from app.database import (
 )
 from app.organizer import (
     analyze_inbox_with_openai,
+    analyze_single_note,
+    clean_transcript,
     estimate_progress,
     extract_content_from_file,
     validate_analysis_result,
@@ -76,6 +83,35 @@ def create_item(payload: InboxItemCreate):
         raise HTTPException(
             status_code=500,
             detail="Unable to save item. Please try again.",
+        ) from exc
+
+
+@app.post("/api/items/{item_id}/organize", response_model=List[Task])
+def organize_item(item_id: int, source: Optional[str] = Query(None, max_length=20)):
+    """Fast path: analyze just this one note and create its task(s).
+
+    When ``source=voice``, the note is a raw speech-to-text transcript, so it
+    first goes through a light de-garbling pass; the cleaned text is saved back
+    to the item so the saved note matches what was parsed.
+    """
+    item = get_item_from_db(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found.")
+    try:
+        text = item.get("raw_text") or ""
+        if source == "voice" and text.strip():
+            cleaned = clean_transcript(text)
+            if cleaned and cleaned != text:
+                updated = update_item_in_db(item_id, cleaned)
+                if updated is not None:
+                    text = cleaned
+        todos = analyze_single_note(text)
+        return create_tasks_for_item(item_id, todos)
+    except Exception as exc:
+        logger.exception("Failed to organize item")
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to organize this note. Please try again.",
         ) from exc
 
 
@@ -403,6 +439,100 @@ def analyze_inbox():
         ) from exc
 
 
+def _gmail_redirect_uri(request: Request) -> str:
+    # Google treats 127.0.0.1 and localhost as DIFFERENT redirect URIs, so the
+    # callback we send must exactly match what's registered on the OAuth client.
+    # Normalize the loopback host to "localhost" (what the setup docs register)
+    # so it works whether the user browses via localhost or 127.0.0.1. Override
+    # with GMAIL_REDIRECT_URI if you host the app elsewhere.
+    override = os.getenv("GMAIL_REDIRECT_URI")
+    if override:
+        return override
+    uri = str(request.url_for("gmail_callback"))
+    return uri.replace("://127.0.0.1", "://localhost")
+
+
+@app.get("/api/gmail/status")
+def gmail_status():
+    """Report whether Gmail is configured (client secret present) and whether
+    the user has connected an account (a usable token is stored)."""
+    try:
+        configured = gmail_sync.client_secret_configured()
+        connected = gmail_sync.is_connected() if configured else False
+    except Exception:
+        logger.exception("Failed to read Gmail status")
+        configured = False
+        connected = False
+    return {"configured": configured, "connected": connected}
+
+
+@app.get("/api/gmail/auth")
+def gmail_auth(request: Request):
+    """Send the user to Google's consent screen."""
+    try:
+        url = gmail_sync.build_authorization_url(_gmail_redirect_uri(request))
+    except gmail_sync.GmailNotConfigured as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Gmail is not set up yet. Add your Google OAuth client secret "
+                "first (see the README)."
+            ),
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to start Gmail OAuth")
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to start Gmail connection. Please try again.",
+        ) from exc
+    return RedirectResponse(url)
+
+
+@app.get("/api/gmail/callback", name="gmail_callback")
+def gmail_callback(request: Request, code: Optional[str] = None, error: Optional[str] = None):
+    """OAuth redirect target: exchange the code for a token, then return home."""
+    if error or not code:
+        return RedirectResponse("/?gmail=error")
+    try:
+        gmail_sync.exchange_code(_gmail_redirect_uri(request), code)
+    except Exception:
+        logger.exception("Failed to complete Gmail OAuth")
+        return RedirectResponse("/?gmail=error")
+    return RedirectResponse("/?gmail=connected")
+
+
+@app.post("/api/gmail/sync")
+def gmail_sync_now(
+    max_results: int = Query(
+        gmail_sync.DEFAULT_MAX_RESULTS, ge=1, le=50
+    ),
+):
+    """Pull recent emails, turn the new ones into tasks, and report the counts.
+    Idempotent: already-synced emails are skipped."""
+    try:
+        return gmail_sync.sync_recent_emails(max_results=max_results)
+    except gmail_sync.GmailNotConnected as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Gmail is not connected yet. Connect your account first.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to sync Gmail")
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to sync Gmail right now. Please try again.",
+        ) from exc
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return (APP_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+    html = (APP_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+    # Cache-bust static assets by their file mtime so edits always load without
+    # a hard refresh (browsers otherwise serve a stale app.js/styles.css).
+    for asset in ("app.js", "styles.css"):
+        try:
+            ver = int((APP_DIR / "static" / asset).stat().st_mtime)
+        except OSError:
+            continue
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={ver}")
+    return html
